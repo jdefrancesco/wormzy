@@ -4,7 +4,7 @@ go 1.24.5
 
 require (
 	github.com/pion/stun v0.6.1
-	github.com/quic-go/quic-go v0.47.0
+	github.com/quic-go/quic-go v0.48.2
 )
 
 require (
