@@ -5,6 +5,10 @@ A simple, secure, and fast way to send files of any size to someone.
 Similar to magic-wormhole 
 
 
+# TODO
+
+* Fix upgraded modules. Previous stun/quic were insecure but broke mvp 
+* 
 ### Architecture
 
 * Connection flow: rendezvous → key agreement → direct QUIC attempt → relay fallback (timeouts sane?).
