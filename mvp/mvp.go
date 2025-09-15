@@ -41,9 +41,7 @@ func main() {
 	)
 	flag.Parse()
 
-	// 1) Bind single UDP socket for STUN, punching, and QUIC.
-	// udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
-	// We want to bind UDP on IPv4 ONLY
+	// 1) Bind single UDP socket for STUN, punching, and QUIC (IPv4-only).
 	laddr4, _ := net.ResolveUDPAddr("udp4", "0.0.0.0:0")
 	udpConn, err := net.ListenUDP("udp4", laddr4)
 	check(err)
@@ -59,8 +57,8 @@ func main() {
 		"stun.cloudflare.com:3478",
 		"stun.sipgate.net:3478",
 	}, 4*time.Second)
-
 	check(err)
+
 	self := SelfInfo{Public: pub.String(), Local: udpConn.LocalAddr().String()}
 	fmt.Printf("[*] STUN public: %s\n", self.Public)
 
@@ -115,9 +113,7 @@ func main() {
 	clientTLS := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{alpn}}
 
 	// 6) Start QUIC over the SAME UDP socket.
-	var (
-		qconn quic.Connection
-	)
+	var qconn *quic.Conn
 
 	if role == "server" {
 		// Listen on packet conn (no extra UDP sockets).
@@ -151,7 +147,7 @@ func main() {
 
 	// 7) Chat + file send.
 	// Use bidi stream 0 for chat.
-	var chat quic.Stream
+	var chat *quic.Stream
 	if role == "server" {
 		var err error
 		chat, err = qconn.AcceptStream(context.Background())
@@ -223,7 +219,7 @@ Header format:
 Little-endian.
 ***/
 
-func sendFile(conn quic.Connection, path string) error {
+func sendFile(conn *quic.Conn, path string) error {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return err
@@ -245,7 +241,7 @@ func sendFile(conn quic.Connection, path string) error {
 	defer f.Close()
 
 	// Open a unidirectional stream
-	us, err := conn.OpenUniStreamSync(context.Background())
+	us, err := conn.OpenUniStreamSync(context.Background()) // *quic.SendStream
 	if err != nil {
 		return err
 	}
@@ -267,11 +263,11 @@ func sendFile(conn quic.Connection, path string) error {
 	return err
 }
 
-func receiveFilesForever(conn quic.Connection) {
+func receiveFilesForever(conn *quic.Conn) {
 	// Accept uni streams forever; save files into current dir
 	go func() {
 		for {
-			us, err := conn.AcceptUniStream(context.Background())
+			us, err := conn.AcceptUniStream(context.Background()) // *quic.ReceiveStream
 			if err != nil {
 				fmt.Println("[!] accept uni error:", err)
 				return
@@ -281,7 +277,7 @@ func receiveFilesForever(conn quic.Connection) {
 	}()
 }
 
-func handleIncomingFile(us quic.ReceiveStream) {
+func handleIncomingFile(us *quic.ReceiveStream) {
 	defer us.CancelRead(0)
 
 	// Read header
