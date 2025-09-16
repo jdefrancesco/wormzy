@@ -65,16 +65,6 @@ func main() {
 		fatal("send mode requires -file")
 	}
 
-	// Prompt for code on receiver if missing
-	if *mode == "recv" && *code == "" {
-		fmt.Print("Enter code: ")
-		in := bufio.NewReader(os.Stdin)
-		line, _ := in.ReadString('\n')
-		*code = strings.TrimSpace(line)
-		if *code == "" {
-			fatal("no code provided")
-		}
-	}
 	// 1) One UDP socket for STUN, punching, and QUIC
 	laddr4, _ := net.ResolveUDPAddr("udp4", "0.0.0.0:0")
 	udpConn, err := net.ListenUDP("udp4", laddr4)
