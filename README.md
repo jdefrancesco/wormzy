@@ -4,7 +4,23 @@ A simple, secure, and fast way to send files of any size to someone.
 
 Similar to magic-wormhole 
 
+## Quick Start
 
+```bash
+# plaintext (dev)
+go run ./cmd/rendezvous
+
+# or TLS (recommended):
+go run ./cmd/rendezvous -addr :9999 -tlscert server.crt -tlskey server.key
+```
+
+```bash
+go run ./cmd/wormzy -mode send -file ./big.bin -code f7p9-x2 -relay 127.0.0.1:9999
+```
+
+```bash
+go run ./cmd/wormzy -mode recv -code f7p9-x2 -relay 127.0.0.1:9999
+```
  
 ### Architecture
 
@@ -20,8 +36,8 @@ Similar to magic-wormhole
 
 ### File transfer & integrity
 
-* Chunking & resumability: content length vs. sparse files, per-chunk MAC or global MAC+Merkle; final hash (BLAKE3/SHA-256) compared out-of-band.
-* Backpressure: bounded queues; avoid unbounded goroutine fan-out.
+* Chunking & reusability: content length vs. sparse files, per-chunk MAC or global MAC+Merkle; final hash (BLAKE3/SHA-256) compared out-of-band.
+* Back pressure: bounded queues; avoid unbounded goroutine fan-out.
 * Zero-copy paths where possible (`io.CopyBuffer`, `sendfile` on relay path).
 
 ### NAT/relay (PUNCHING)
@@ -40,15 +56,9 @@ Similar to magic-wormhole
 * CLI UX: progress bars, ETA, retries; `wormzy send <file>`, `wormzy recv <code>`.
 * Config/env: `WORMZY_RENDEZVOUS`, `WORMZY_STUN`, `WORMZY_RELAY`.
 
----
 
-#### SECURITY.md (skeleton)
+## Security Policy
 
-```markdown
-# Security Policy
-
-## Supported Versions
-MVP: latest main branch.
 
 ## Reporting a Vulnerability
 
