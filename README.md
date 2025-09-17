@@ -26,7 +26,7 @@ go run ./cmd/wormzy -mode recv -code f7p9-x2 -relay 127.0.0.1:9999
 
 * Connection flow: rendezvous → key agreement → direct QUIC attempt → relay fallback (timeouts sane?).
 * UDP hole-punch sequencing: simultaneous open, STUN timeout/backoff, public/peer-reflexive addr preference.
-* QUIC config: MaxStreamReceiveWindow / MaxIncomingStreams, keepalives, idle timeout, 0-RTT disabled unless rekeyed.
+* QUIC config: MaxStreamReceiveWindow / MaxIncomingStreams, connection keep-alive, idle timeout, 0-RTT disabled unless rekeyed.
 
 ### Crypto 
 
