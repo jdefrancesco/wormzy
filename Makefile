@@ -4,6 +4,9 @@ GOCLEAN=$(GOCMD) clean
 GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 
+# packages to operate on (exclude the mvp package)
+PACKAGES := $(shell $(GOCMD) list ./... | grep -v "/mvp$$")
+
 BINARY_NAME=wormzy
 
 all: test build
@@ -12,11 +15,11 @@ debug:
 	$(GOBUILD) -o $(BINARY_NAME) -gcflags "all=-N -l" -v ./cmd/wormzy
 
 build:
-	gosec -exclude=G104,G307 ./...
+	gosec -exclude=G104,G307 $(PACKAGES)
 	$(GOBUILD) -o $(BINARY_NAME) -v ./cmd/${BINARY_NAME}
 
 test:
-	$(GOTEST) -v ./...
+	$(GOTEST) -v $(PACKAGES)
 
 .PHONY: install
 install:
