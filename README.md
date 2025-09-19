@@ -1,8 +1,14 @@
-# Wormzy 
+# Wormzy
 
-A simple, secure, and fast way to send files of any size to someone.
+Wormzy aims to be simple and secure way to share large files with another party.
 
-Similar to magic-wormhole 
+Wormzy allows users to send files directly to another party with ease. Its primary features 
+include:
+
+* Send file of any size peer-to-peer. No need to change NAT rules. 
+* Communication is secure/encrypted
+* Utilizes QUIC for fast transfers.
+
 
 ## Quick Start
 
