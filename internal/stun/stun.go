@@ -162,3 +162,85 @@ func probeServer(ctx context.Context, server string, rto time.Duration, maxRetra
 		}
 	}
 }
+
+// DiscoverOnConn sends STUN binding requests for the provided UDP socket using
+// the given server list. It returns the first mapped address discovered.
+func DiscoverOnConn(ctx context.Context, conn *net.UDPConn, servers []string, rto time.Duration, maxRetrans uint) (*net.UDPAddr, error) {
+	if conn == nil {
+		return nil, fmt.Errorf("nil UDP conn")
+	}
+	if len(servers) == 0 {
+		servers = StunServers
+	}
+	if rto <= 0 {
+		rto = 2 * time.Second
+	}
+	var firstErr error
+	for _, server := range servers {
+		addr, err := probeWithConn(ctx, conn, server, rto, maxRetrans)
+		if err == nil && addr != nil {
+			return addr, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr == nil {
+		firstErr = fmt.Errorf("no STUN response")
+	}
+	return nil, firstErr
+}
+
+func probeWithConn(ctx context.Context, conn *net.UDPConn, server string, rto time.Duration, maxRetrans uint) (*net.UDPAddr, error) {
+	srv, err := net.ResolveUDPAddr("udp4", server)
+	if err != nil {
+		return nil, err
+	}
+	req := stun.MustBuild(stun.TransactionID, stun.BindingRequest, stun.Fingerprint)
+
+	buf := make([]byte, 1500)
+
+	defer conn.SetReadDeadline(time.Time{})
+
+	for attempt := uint(0); attempt <= maxRetrans; attempt++ {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		if _, err := conn.WriteToUDP(req.Raw, srv); err != nil {
+			return nil, err
+		}
+
+		for {
+			if err := conn.SetReadDeadline(time.Now().Add(rto)); err != nil {
+				return nil, err
+			}
+			n, from, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					break
+				}
+				return nil, err
+			}
+			if !from.IP.Equal(srv.IP) || from.Port != srv.Port {
+				continue
+			}
+			var m stun.Message
+			m.Raw = buf[:n]
+			if err := m.Decode(); err != nil || m.Type != stun.BindingSuccess {
+				continue
+			}
+			var xor stun.XORMappedAddress
+			if err := xor.GetFrom(&m); err == nil {
+				return &net.UDPAddr{IP: xor.IP, Port: xor.Port}, nil
+			}
+			var ma stun.MappedAddress
+			if err := ma.GetFrom(&m); err == nil {
+				return &net.UDPAddr{IP: ma.IP, Port: ma.Port}, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("no STUN from %s", server)
+}

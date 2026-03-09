@@ -69,3 +69,53 @@ func TestProbeServer_Success(t *testing.T) {
 		t.Fatalf("unexpected mapped addr: got %v want %v:%d", got, mappedIP, mappedPort)
 	}
 }
+
+func TestDiscoverOnConn(t *testing.T) {
+	// fake STUN server
+	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer server.Close()
+
+	respIP := net.ParseIP("5.6.7.8")
+	respPort := 4242
+
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, addr, err := server.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			_ = n
+			res := stun.MustBuild(stun.TransactionID, stun.BindingSuccess,
+				&stun.XORMappedAddress{IP: respIP, Port: respPort}, stun.Fingerprint)
+			_, _ = server.WriteToUDP(res.Raw, addr)
+		}
+	}()
+
+	client, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatalf("client listen failed: %v", err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	srvAddr := server.LocalAddr().(*net.UDPAddr)
+	host := srvAddr.IP.String()
+	if host == "" || host == "0.0.0.0" {
+		host = "127.0.0.1"
+	}
+	serverAddr := net.JoinHostPort(host, strconv.Itoa(srvAddr.Port))
+
+	got, err := DiscoverOnConn(ctx, client, []string{serverAddr}, 200*time.Millisecond, 1)
+	if err != nil {
+		t.Fatalf("DiscoverOnConn failed: %v", err)
+	}
+	if got == nil || !got.IP.Equal(respIP) || got.Port != respPort {
+		t.Fatalf("unexpected mapped addr: got %v want %v:%d", got, respIP, respPort)
+	}
+}
