@@ -300,7 +300,6 @@ func rendezvousExchange(ctx context.Context, cfg Config, me rendezvous.SelfInfo,
 	if err != nil {
 		return peer, assigned, nil, err
 	}
-	mailbox.Cleanup(ctx)
 	return *peerInfo, assigned, psk, nil
 }
 
@@ -596,6 +595,8 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) e
 			return er
 		}
 	}
+	// Ensure we report 100% once data is flushed.
+	reportTransferProgress(rep, "Sending", size, size, &lastPct)
 	meta := fileMetadata{
 		Hash:      "blake3-256",
 		ChunkSize: uint32(chunkSize),
@@ -674,6 +675,7 @@ func receiveFile(conn *quic.Conn, key []byte, rep Reporter) (string, error) {
 			break
 		}
 	}
+	reportTransferProgress(rep, "Receiving", int64(size), int64(size), &lastPct)
 	if written != size {
 		return "", fmt.Errorf("expected %d bytes, wrote %d", size, written)
 	}
