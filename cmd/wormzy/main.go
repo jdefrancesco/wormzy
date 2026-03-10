@@ -81,6 +81,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	stop()
+
 	if err := <-done; err != nil {
 		os.Exit(1)
 	}

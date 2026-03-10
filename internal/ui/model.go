@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -104,11 +106,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.progress = progressFromSteps(m.steps)
 	case DoneMsg:
 		m.done = true
-		m.err = msg.Err
 		if msg.Result != nil {
 			m.session.Code = msg.Result.Code
 		}
-		return m, tea.Quit
+		switch {
+		case msg.Err == nil:
+			m.err = nil
+			return m, tea.Quit
+		case errors.Is(msg.Err, context.Canceled):
+			m.err = nil
+			return m, tea.Quit
+		default:
+			m.err = msg.Err
+		}
 	}
 	return m, nil
 }
@@ -128,12 +138,10 @@ func (m Model) View() string {
 	}
 	b.WriteString("\n")
 	if m.err != nil {
-		b.WriteString(errorStyle.Render("⚠ " + m.err.Error()))
-	} else if m.done {
-		b.WriteString(successStyle.Render("Transfer complete — press q to exit"))
-	} else {
-		b.WriteString(subtleStyle.Render("Press q to quit"))
+		b.WriteString(renderIssuePanel(m.err))
+		b.WriteString("\n")
 	}
+	b.WriteString(renderFooter(m.done, m.err))
 	b.WriteString("\n")
 	return b.String()
 }
@@ -185,6 +193,58 @@ func renderLogs(logs []string) string {
 	return boxStyle.Render("Logs\n" + subtleStyle.Render(strings.Join(logs, "\n")))
 }
 
+func renderIssuePanel(err error) string {
+	lines := []string{
+		issueTitleStyle.Render("Something went wrong"),
+		highlightText.Render(err.Error()),
+	}
+	if tips := suggestionsForError(err); len(tips) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, subtleStyle.Render("Next steps"))
+		for _, tip := range tips {
+			lines = append(lines, " • "+tip)
+		}
+	}
+	lines = append(lines, "")
+	lines = append(lines, subtleStyle.Render("Press q to exit"))
+	return issueBoxStyle.Render(strings.Join(lines, "\n"))
+}
+
+func suggestionsForError(err error) []string {
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "no route to host"), strings.Contains(msg, "network is unreachable"):
+		return []string{
+			"Host networking blocked UDP; run wormzy outside the sandbox or on a machine with internet access.",
+			"Use `-dev-loopback` to simulate transfers on localhost.",
+		}
+	case strings.Contains(msg, "permission denied"), strings.Contains(msg, "operation not permitted"):
+		return []string{
+			"OS refused to bind UDP; request the necessary privileges or try again locally.",
+			"`-dev-loopback` keeps traffic on 127.0.0.1 for demos.",
+		}
+	case strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline exceeded"):
+		return []string{
+			"Timed out waiting for the relay; confirm the `-relay` address and your upstream connectivity.",
+		}
+	default:
+		return []string{
+			"Review the log panel above for STUN / relay output before retrying.",
+		}
+	}
+}
+
+func renderFooter(done bool, err error) string {
+	switch {
+	case err != nil:
+		return subtleStyle.Render("Press q to exit once you've captured the issue")
+	case done:
+		return successStyle.Render("Transfer complete — press q to exit")
+	default:
+		return subtleStyle.Render("Press q to quit")
+	}
+}
+
 func renderProgress(p float64) string {
 	if p < 0 {
 		p = 0
@@ -226,12 +286,14 @@ func orDash(s string) string {
 }
 
 var (
-	headerStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5FD2")).MarginBottom(1)
-	boxStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).BorderForeground(lipgloss.Color("#555555"))
-	stepTitleStyle = lipgloss.NewStyle().Bold(true)
-	highlightText = lipgloss.NewStyle().Foreground(lipgloss.Color("#00D7FF"))
-	subtleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#777777"))
-	accentStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#5DFFB4"))
-	successStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#5DFF8D"))
-	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5F87"))
+	headerStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5FD2")).MarginBottom(1)
+	boxStyle        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).BorderForeground(lipgloss.Color("#555555"))
+	issueBoxStyle   = lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(0, 1).BorderForeground(lipgloss.Color("#FF5F87"))
+	stepTitleStyle  = lipgloss.NewStyle().Bold(true)
+	highlightText   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00D7FF"))
+	subtleStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#777777"))
+	accentStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#5DFFB4"))
+	successStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#5DFF8D"))
+	errorStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5F87"))
+	issueTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5F87"))
 )
