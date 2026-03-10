@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	filippo.io/cpace v0.0.0-20210101143347-24d601e2e469
+	github.com/alicebob/miniredis/v2 v2.37.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/flynn/noise v1.1.0
@@ -39,6 +40,7 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/mock v0.6.0 // indirect
 	golang.org/x/net v0.51.0 // indirect

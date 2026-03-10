@@ -27,7 +27,7 @@ func main() {
 		mode        = flag.String("mode", "", "send or recv")
 		file        = flag.String("file", "", "file to send (send mode only)")
 		code        = flag.String("code", "", "wormzy pairing code")
-		relay       = flag.String("relay", "127.0.0.1:9999", "rendezvous address")
+		relay       = flag.String("relay", "", "redis address/URL for rendezvous (defaults to WORMZY_RELAY_URL or 127.0.0.1:6379)")
 		relayPin    = flag.String("relay-pin", "", "base64(SHA256(SPKI)) pin for rendezvous TLS")
 		timeout     = flag.Duration("timeout", 60*time.Second, "overall rendezvous timeout")
 		loopback    = flag.Bool("dev-loopback", false, "use local addresses for testing")
@@ -61,11 +61,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	relayAddr := resolveRelay(*relay)
+
 	cfg := transport.Config{
 		Mode:      *mode,
 		FilePath:  *file,
 		Code:      *code,
-		RelayAddr: *relay,
+		RelayAddr: relayAddr,
 		RelayPin:  *relayPin,
 		Timeout:   *timeout,
 		Loopback:  *loopback,
@@ -79,7 +81,7 @@ func main() {
 	session := ui.Session{
 		Mode:        strings.ToUpper(*mode),
 		File:        displayFile(*mode, *file),
-		Relay:       *relay,
+		Relay:       relayAddr,
 		ShowNetwork: *showNetwork,
 	}
 	model := ui.NewModel(session)
@@ -196,4 +198,17 @@ func promptForCode() (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(code), nil
+}
+
+func resolveRelay(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if env := os.Getenv("WORMZY_RELAY_URL"); env != "" {
+		return env
+	}
+	if env := os.Getenv("WORMZY_RELAY"); env != "" {
+		return env
+	}
+	return transport.DefaultRelay()
 }

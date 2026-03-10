@@ -267,6 +267,11 @@ func (cfg Config) stunServers() []string {
 	return stun.StunServers
 }
 
+// DefaultRelay returns the compiled-in rendezvous Redis endpoint.
+func DefaultRelay() string {
+	return defaultRelay
+}
+
 func rendezvousExchange(ctx context.Context, cfg Config, me rendezvous.SelfInfo, rep Reporter) (peer rendezvous.SelfInfo, assigned string, psk []byte, err error) {
 	mailbox, err := newRedisMailbox(ctx, cfg.RelayAddr, cfg.Timeout, cfg.Mode)
 	if err != nil {

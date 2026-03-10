@@ -12,21 +12,39 @@ include:
 
 ## Quick Start
 
-```bash
-# plaintext (dev)
-go run ./cmd/rendezvous
+Wormzy automatically spins up an embedded Redis mailbox for local development, so you can run both peers on your laptop without any extra setup:
 
-# or TLS (recommended):
-go run ./cmd/rendezvous -addr :9999 -tlscert server.crt -tlskey server.key
+```bash
+go run ./cmd/wormzy send ./big.bin
+# => displays a pairing code such as f7p9-x2
 ```
 
 ```bash
-go run ./cmd/wormzy -mode send -file ./big.bin -code f7p9-x2 -relay 127.0.0.1:9999
+go run ./cmd/wormzy recv
+# prompted for the pairing code, then the file arrives
 ```
 
+When you deploy a managed Redis instance (recommended), set the endpoint via an env var instead of sprinkling `-relay` flags:
+
 ```bash
-go run ./cmd/wormzy -mode recv -code f7p9-x2 -relay 127.0.0.1:9999
+export WORMZY_RELAY_URL="rediss://default:<password>@redis-12345.c1.us-east-1-2.ec2.cloud.redislabs.com:25061"
+go run ./cmd/wormzy send ./big.bin
+go run ./cmd/wormzy recv
 ```
+
+`WORMZY_RELAY_URL` takes precedence over CLI flags; fall back to `WORMZY_RELAY` or `-relay` only when you need to override the default.
+
+### Hosting the relay on DigitalOcean Managed Redis
+
+1. In the DigitalOcean dashboard, create a **Managed Database → Redis** cluster (the smallest plan is plenty). Choose the region closest to your users.
+2. Once provisioned, grab the `rediss://` connection string from the “Connection Details” panel (it includes the username, password, host, and TLS port).
+3. Export that URL on both peers before running Wormzy:
+   ```bash
+   export WORMZY_RELAY_URL="rediss://default:<password>@primary-do-redis.example.com:25061"
+   ```
+4. Run `wormzy send <file>` / `wormzy recv` as usual. The CLI will use your managed Redis mailbox automatically; no additional flags required.
+
+You can still override the relay per invocation (`wormzy send -relay rediss://...`) and the embedded Redis fallback remains available for offline demos.
  
 ### Architecture
 

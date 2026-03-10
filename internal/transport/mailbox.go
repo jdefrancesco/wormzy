@@ -3,10 +3,12 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	miniredis "github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/jdefrancesco/internal/rendezvous"
@@ -23,6 +25,7 @@ type redisMailbox struct {
 	ttl    time.Duration
 	prefix string
 	role   string
+	stop   func()
 }
 
 func newRedisMailbox(ctx context.Context, addr string, ttl time.Duration, role string) (*redisMailbox, error) {
@@ -32,7 +35,30 @@ func newRedisMailbox(ctx context.Context, addr string, ttl time.Duration, role s
 	}
 	client := redis.NewClient(opts)
 	if err := client.Ping(ctx).Err(); err != nil {
-		return nil, err
+		useEmbedded := addr == "" || addr == defaultRelay || errors.Is(err, context.DeadlineExceeded)
+		if !useEmbedded {
+			return nil, fmt.Errorf("redis connection failed: %w", err)
+		}
+		mini, mErr := miniredis.Run()
+		if mErr != nil {
+			return nil, fmt.Errorf("redis connection failed: %v (fallback start error: %w)", err, mErr)
+		}
+		_ = client.Close()
+		opts = &redis.Options{Addr: mini.Addr()}
+		client = redis.NewClient(opts)
+		if pingErr := client.Ping(ctx).Err(); pingErr != nil {
+			mini.Close()
+			return nil, fmt.Errorf("embedded redis unavailable: %w", pingErr)
+		}
+		return &redisMailbox{
+			client: client,
+			ttl:    ttl,
+			prefix: "wormzy",
+			role:   role,
+			stop: func() {
+				mini.Close()
+			},
+		}, nil
 	}
 	return &redisMailbox{
 		client: client,
@@ -45,6 +71,9 @@ func newRedisMailbox(ctx context.Context, addr string, ttl time.Duration, role s
 func (m *redisMailbox) Close() error {
 	if m == nil || m.client == nil {
 		return nil
+	}
+	if m.stop != nil {
+		m.stop()
 	}
 	return m.client.Close()
 }
