@@ -1,4 +1,4 @@
-GOCMD=go 
+GOCMD=go
 GOBUILD=$(GOCMD) build
 GOCLEAN=$(GOCMD) clean
 GOTEST=$(GOCMD) test
@@ -12,7 +12,7 @@ BINARY_NAME=wormzy
 
 all: test build
 
-debug: 
+debug:
 	$(GOBUILD) -o $(BINARY_NAME) -gcflags "all=-N -l" -v ./cmd/wormzy
 
 build:
@@ -43,3 +43,8 @@ gosec:
 clean:
 	$(GOCLEAN)
 	rm -f $(BINARY_NAME)
+
+
+.PHONY: sec-lint
+sec-lint:
+	golangci-lint run -v --config .golangci.yml ./...

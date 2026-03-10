@@ -1,12 +1,77 @@
+version: "2"
+
 run:
-  timeout: 3m
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+  allow-parallel-runners: true
+
+output:
+  formats:
+    text:
+      path: stdout
+      colors: true
+
 linters:
+  default: none
   enable:
-    - govet
     - staticcheck
-    - gosimple
+    - govet
     - errcheck
-    - gosec
+    - ineffassign
+    - unused
+    - gocritic
     - revive
+    - gosec
+    - bodyclose
+    - rowserrcheck
+    - sqlclosecheck
+    - contextcheck
+    - durationcheck
+    - prealloc
+    - nakedret
+    - unconvert
+    - copyloopvar
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+
+    govet:
+      enable:
+        - shadow
+
+    revive:
+      severity: warning
+      rules:
+        - name: var-naming
+        - name: exported
+        - name: indent-error-flow
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+
+    gosec:
+      severity: medium
+      confidence: medium
+
 issues:
-  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+  exclude-rules:
+    - linters:
+        - revive
+      text: "exported .* should have comment"
+
+    - linters:
+        - gocritic
+      text: "unnamedResult"
+
+    - linters:
+        - gosec
+      text: "G104"
