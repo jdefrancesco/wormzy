@@ -220,7 +220,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (*Result, error) {
 	switch cfg.Mode {
 	case "send":
 		reporter.Stage(StageTransfer, StageStateRunning, "streaming file")
-		if err := sendFileEncrypted(quicConn, cfg.FilePath, fileKey); err != nil {
+		if err := sendFileEncrypted(quicConn, cfg.FilePath, fileKey, reporter); err != nil {
 			reporter.Stage(StageTransfer, StageStateError, err.Error())
 			return nil, err
 		}
@@ -228,7 +228,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (*Result, error) {
 		reporter.Stage(StageTransfer, StageStateDone, "file sent")
 	case "recv":
 		reporter.Stage(StageTransfer, StageStateRunning, "receiving file")
-		path, err := receiveFile(quicConn, fileKey)
+		path, err := receiveFile(quicConn, fileKey, reporter)
 		if err != nil {
 			reporter.Stage(StageTransfer, StageStateError, err.Error())
 			return nil, err
@@ -527,7 +527,7 @@ func (r *aeadReader) ReadChunk() ([]byte, error) {
 	return pt, nil
 }
 
-func sendFileEncrypted(conn *quic.Conn, path string, key []byte) error {
+func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) error {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return err
@@ -576,6 +576,9 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte) error {
 
 	hasher := blake3.New()
 	buf := make([]byte, chunkSize)
+	var sent int64
+	lastPct := -1
+
 	for {
 		n, er := file.Read(buf)
 		if n > 0 {
@@ -583,6 +586,8 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte) error {
 			if err := writer.WriteChunk(buf[:n]); err != nil {
 				return err
 			}
+			sent += int64(n)
+			reportTransferProgress(rep, "Sending", sent, size, &lastPct)
 		}
 		if er == io.EOF {
 			break
@@ -607,7 +612,7 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte) error {
 	return nil
 }
 
-func receiveFile(conn *quic.Conn, key []byte) (string, error) {
+func receiveFile(conn *quic.Conn, key []byte, rep Reporter) (string, error) {
 	stream, err := conn.AcceptUniStream(context.Background())
 	if err != nil {
 		return "", err
@@ -649,6 +654,8 @@ func receiveFile(conn *quic.Conn, key []byte) (string, error) {
 
 	hasher := blake3.New()
 	var written uint64
+	lastPct := -1
+
 	for {
 		chunk, err := reader.ReadChunk()
 		if err == io.EOF {
@@ -662,6 +669,7 @@ func receiveFile(conn *quic.Conn, key []byte) (string, error) {
 			return "", err
 		}
 		written += uint64(len(chunk))
+		reportTransferProgress(rep, "Receiving", int64(written), int64(size), &lastPct)
 		if written >= size {
 			break
 		}
@@ -747,4 +755,35 @@ func selfSignedTLS() (*tls.Config, error) {
 		Certificate: [][]byte{der},
 		PrivateKey:  key,
 	}}}, nil
+}
+
+func reportTransferProgress(rep Reporter, verb string, current, total int64, lastPct *int) {
+	if rep == nil || total <= 0 {
+		return
+	}
+	pct := int((current * 100) / total)
+	if pct > 100 {
+		pct = 100
+	}
+	if lastPct != nil && pct == *lastPct {
+		return
+	}
+	detail := fmt.Sprintf("%s %s/%s (%d%%)", verb, formatBytes(current), formatBytes(total), pct)
+	rep.Stage(StageTransfer, StageStateRunning, detail)
+	if lastPct != nil {
+		*lastPct = pct
+	}
+}
+
+func formatBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }

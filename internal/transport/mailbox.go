@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -33,32 +34,16 @@ func newRedisMailbox(ctx context.Context, addr string, ttl time.Duration, role s
 	if err != nil {
 		opts = &redis.Options{Addr: addr}
 	}
+	if useEmbeddedByDefault(addr, opts) {
+		return startEmbeddedMailbox(ttl, role)
+	}
 	client := redis.NewClient(opts)
 	if err := client.Ping(ctx).Err(); err != nil {
 		useEmbedded := addr == "" || addr == defaultRelay || errors.Is(err, context.DeadlineExceeded)
 		if !useEmbedded {
 			return nil, fmt.Errorf("redis connection failed: %w", err)
 		}
-		mini, mErr := miniredis.Run()
-		if mErr != nil {
-			return nil, fmt.Errorf("redis connection failed: %v (fallback start error: %w)", err, mErr)
-		}
-		_ = client.Close()
-		opts = &redis.Options{Addr: mini.Addr()}
-		client = redis.NewClient(opts)
-		if pingErr := client.Ping(ctx).Err(); pingErr != nil {
-			mini.Close()
-			return nil, fmt.Errorf("embedded redis unavailable: %w", pingErr)
-		}
-		return &redisMailbox{
-			client: client,
-			ttl:    ttl,
-			prefix: "wormzy",
-			role:   role,
-			stop: func() {
-				mini.Close()
-			},
-		}, nil
+		return startEmbeddedMailbox(ttl, role)
 	}
 	return &redisMailbox{
 		client: client,
@@ -76,6 +61,39 @@ func (m *redisMailbox) Close() error {
 		m.stop()
 	}
 	return m.client.Close()
+}
+
+func useEmbeddedByDefault(addr string, opts *redis.Options) bool {
+	if addr != "" && addr != defaultRelay {
+		return false
+	}
+	target := opts.Addr
+	if target == "" {
+		target = defaultRelay
+	}
+	conn, err := net.DialTimeout("tcp", target, 200*time.Millisecond)
+	if err != nil {
+		return true
+	}
+	_ = conn.Close()
+	return false
+}
+
+func startEmbeddedMailbox(ttl time.Duration, role string) (*redisMailbox, error) {
+	mini, err := miniredis.Run()
+	if err != nil {
+		return nil, fmt.Errorf("embedded redis unavailable: %w", err)
+	}
+	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	return &redisMailbox{
+		client: client,
+		ttl:    ttl,
+		prefix: "wormzy",
+		role:   role,
+		stop: func() {
+			mini.Close()
+		},
+	}, nil
 }
 
 func (m *redisMailbox) Claim(ctx context.Context, requested string) (string, error) {
