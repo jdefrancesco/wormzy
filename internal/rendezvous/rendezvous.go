@@ -57,9 +57,17 @@ type Hello struct {
 }
 
 // SelfInfo carries the addresses a peer is willing to advertise.
+type Candidate struct {
+	Type     string `json:"type"`
+	Proto    string `json:"proto"`
+	Addr     string `json:"addr"`
+	Priority int    `json:"priority"`
+}
+
 type SelfInfo struct {
-	Public string `json:"public"`
-	Local  string `json:"local"`
+	Public     string      `json:"public"`
+	Local      string      `json:"local"`
+	Candidates []Candidate `json:"candidates,omitempty"`
 }
 
 type message struct {
@@ -294,6 +302,11 @@ func (s *Server) log() *slog.Logger {
 func defaultCode() string {
 	val := rand.Uint32()
 	return fmt.Sprintf("%04x-%02x", val&0xffff, (val>>16)&0xff)
+}
+
+// GenerateCode returns a new human-friendly pairing code.
+func GenerateCode() string {
+	return defaultCode()
 }
 
 func expectSelf(r *bufio.Reader) (*SelfInfo, error) {

@@ -1,7 +1,7 @@
 package transport
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -10,7 +10,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -28,13 +27,14 @@ import (
 	"github.com/jdefrancesco/internal/rendezvous"
 	"github.com/jdefrancesco/internal/stun"
 	"github.com/quic-go/quic-go"
+	"github.com/zeebo/blake3"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
 )
 
 const (
 	alpn          = "p2p-wormzy-1"
-	defaultRelay  = "127.0.0.1:9999"
+	defaultRelay  = "127.0.0.1:6379"
 	defaultDialTO = 60 * time.Second
 )
 
@@ -130,6 +130,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (*Result, error) {
 	if self.Public == "" {
 		self.Public = self.Local
 	}
+	self.Candidates = buildCandidates(self, cfg.Loopback)
 
 	reporter.Stage(StageRendezvous, StageStateRunning, "dialing relay")
 	peer, code, psk, err := rendezvousExchange(ctx, cfg, self, reporter)
@@ -137,13 +138,15 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (*Result, error) {
 		reporter.Stage(StageRendezvous, StageStateError, err.Error())
 		return nil, err
 	}
-	reporter.Stage(StageRendezvous, StageStateDone, peer.Public)
+	chosen, err := selectPeerCandidate(peer, cfg.Loopback)
+	if err != nil {
+		reporter.Stage(StageRendezvous, StageStateError, err.Error())
+		return nil, err
+	}
+	reporter.Stage(StageRendezvous, StageStateDone, fmt.Sprintf("%s (%s)", chosen.Addr, chosen.Type))
 	reporter.Logf("paired with code %s", code)
 
-	peerAddr := peer.Public
-	if cfg.Loopback && peer.Local != "" {
-		peerAddr = peer.Local
-	}
+	peerAddr := chosen.Addr
 	peerUDP, err := net.ResolveUDPAddr("udp4", peerAddr)
 	if err != nil {
 		return nil, err
@@ -265,108 +268,48 @@ func (cfg Config) stunServers() []string {
 }
 
 func rendezvousExchange(ctx context.Context, cfg Config, me rendezvous.SelfInfo, rep Reporter) (peer rendezvous.SelfInfo, assigned string, psk []byte, err error) {
-	dialer := func() (net.Conn, error) {
-		if cfg.RelayPin != "" {
-			return tls.Dial("tcp", cfg.RelayAddr, tlsPinnedConfig(cfg.RelayPin))
-		}
-		conn, err := tls.Dial("tcp", cfg.RelayAddr, tlsPinnedConfig(""))
-		if err != nil {
-			return net.Dial("tcp", cfg.RelayAddr)
-		}
-		return conn, nil
-	}
-
-	conn, err := dialer()
+	mailbox, err := newRedisMailbox(ctx, cfg.RelayAddr, cfg.Timeout, cfg.Mode)
 	if err != nil {
 		return peer, assigned, nil, err
 	}
-	defer conn.Close()
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	}
-	r := bufio.NewReader(conn)
+	defer mailbox.Close()
 
-	if err := writeMsg(conn, "hello", map[string]string{"role": cfg.Mode, "code": cfg.Code}); err != nil {
-		return peer, assigned, nil, err
-	}
-
-	msg, err := readMsg(r)
+	code, err := mailbox.Claim(ctx, cfg.Code)
 	if err != nil {
 		return peer, assigned, nil, err
 	}
-	if msg.Type != "code" {
-		return peer, assigned, nil, fmt.Errorf("rendezvous: expected code message, got %s", msg.Type)
-	}
-	var codeBody map[string]string
-	if err := json.Unmarshal(msg.Body, &codeBody); err != nil {
-		return peer, assigned, nil, err
-	}
-	assigned = codeBody["code"]
+	assigned = code
 	rep.Stage(StageRendezvous, StageStateRunning, "code "+assigned)
 	rep.Logf("rendezvous assigned code %s", assigned)
 
-	if err := writeMsg(conn, "self", me); err != nil {
+	if err := mailbox.StoreSelf(ctx, me); err != nil {
 		return peer, assigned, nil, err
 	}
 
-	psk, err = runPAKEOverRelay(r, conn, cfg.Mode, assigned, "send", "recv")
+	psk, err = runPAKEOverMailbox(ctx, mailbox, cfg.Mode, assigned, "send", "recv")
 	if err != nil {
 		return peer, assigned, nil, err
 	}
 
-	// peer info
-	msg, err = readMsg(r)
+	peerInfo, err := mailbox.WaitPeer(ctx)
 	if err != nil {
 		return peer, assigned, nil, err
 	}
-	if msg.Type != "peer" {
-		return peer, assigned, nil, fmt.Errorf("rendezvous: expected peer info, got %s", msg.Type)
-	}
-	if err := json.Unmarshal(msg.Body, &peer); err != nil {
-		return peer, assigned, nil, err
-	}
-	return peer, assigned, psk, nil
+	mailbox.Cleanup(ctx)
+	return *peerInfo, assigned, psk, nil
 }
 
-func tlsPinnedConfig(pinB64 string) *tls.Config {
-	var pin []byte
-	if pinB64 != "" {
-		if dec, err := base64.StdEncoding.DecodeString(pinB64); err == nil && len(dec) == 32 {
-			pin = dec
-		}
-	}
-	return &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		NextProtos:         []string{"wormzy-rendezvous-1"},
-		InsecureSkipVerify: pin == nil,
-		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if pin == nil {
-				return nil
-			}
-			cert, err := x509.ParseCertificate(rawCerts[0])
-			if err != nil {
-				return err
-			}
-			sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
-			if !hmac.Equal(sum[:], pin) {
-				return fmt.Errorf("relay SPKI pin mismatch")
-			}
-			return nil
-		},
-	}
-}
-
-func runPAKEOverRelay(r *bufio.Reader, w io.Writer, role, code, idA, idB string) ([]byte, error) {
+func runPAKEOverMailbox(ctx context.Context, mb *redisMailbox, role, code, idA, idB string) ([]byte, error) {
 	ci := cpace.NewContextInfo(idA, idB, []byte("wormzy-pake-v1"))
 	if role == "send" {
 		msgA, st, err := cpace.Start(code, ci)
 		if err != nil {
 			return nil, err
 		}
-		if err := writeMsg(w, "pake1", msgA); err != nil {
+		if err := mb.Send(ctx, "pake1", msgA); err != nil {
 			return nil, err
 		}
-		m, err := readMsg(r)
+		m, err := mb.Receive(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -381,13 +324,13 @@ func runPAKEOverRelay(r *bufio.Reader, w io.Writer, role, code, idA, idB string)
 		if err != nil {
 			return nil, err
 		}
-		if err := writeMsg(w, "pake2", []byte{}); err != nil {
+		if err := mb.Send(ctx, "pake2", []byte{}); err != nil {
 			return nil, err
 		}
 		return keyA, nil
 	}
 
-	m, err := readMsg(r)
+	m, err := mb.Receive(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -402,11 +345,15 @@ func runPAKEOverRelay(r *bufio.Reader, w io.Writer, role, code, idA, idB string)
 	if err != nil {
 		return nil, err
 	}
-	if err := writeMsg(w, "pake1", msgB); err != nil {
+	if err := mb.Send(ctx, "pake1", msgB); err != nil {
 		return nil, err
 	}
-	if _, err := readMsg(r); err != nil {
+	resp, err := mb.Receive(ctx)
+	if err != nil {
 		return nil, err
+	}
+	if resp.Type != "pake2" {
+		return nil, fmt.Errorf("expected pake2, got %s", resp.Type)
 	}
 	return keyB, nil
 }
@@ -529,6 +476,13 @@ type aeadReader struct {
 	ctr       uint64
 }
 
+type fileMetadata struct {
+	Hash      string `json:"hash"`
+	ChunkSize uint32 `json:"chunk"`
+	Size      uint64 `json:"size"`
+	Digest    []byte `json:"digest"`
+}
+
 func makeNonce(base [24]byte, ctr uint64) []byte {
 	b := base
 	for i := 0; i < 8; i++ {
@@ -615,10 +569,12 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte) error {
 		return err
 	}
 
-	buf := make([]byte, 1<<16)
+	hasher := blake3.New()
+	buf := make([]byte, chunkSize)
 	for {
 		n, er := file.Read(buf)
 		if n > 0 {
+			hasher.Write(buf[:n])
 			if err := writer.WriteChunk(buf[:n]); err != nil {
 				return err
 			}
@@ -629,6 +585,19 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte) error {
 		if er != nil {
 			return er
 		}
+	}
+	meta := fileMetadata{
+		Hash:      "blake3-256",
+		ChunkSize: uint32(chunkSize),
+		Size:      uint64(size),
+		Digest:    hasher.Sum(nil),
+	}
+	payload, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	if err := writer.WriteChunk(append([]byte(metaPrefix), payload...)); err != nil {
+		return err
 	}
 	return nil
 }
@@ -673,6 +642,7 @@ func receiveFile(conn *quic.Conn, key []byte) (string, error) {
 	}
 	defer out.Close()
 
+	hasher := blake3.New()
 	var written uint64
 	for {
 		chunk, err := reader.ReadChunk()
@@ -682,6 +652,7 @@ func receiveFile(conn *quic.Conn, key []byte) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		hasher.Write(chunk)
 		if _, err := out.Write(chunk); err != nil {
 			return "", err
 		}
@@ -689,6 +660,14 @@ func receiveFile(conn *quic.Conn, key []byte) (string, error) {
 		if written >= size {
 			break
 		}
+	}
+	if written != size {
+		return "", fmt.Errorf("expected %d bytes, wrote %d", size, written)
+	}
+
+	sum := hasher.Sum(nil)
+	if err := verifyMetadata(reader, sum); err != nil {
+		return "", err
 	}
 	return out.Name(), nil
 }
@@ -715,41 +694,27 @@ func punchLoop(ctx context.Context, conn *net.UDPConn, peer *net.UDPAddr, stop <
 	}
 }
 
-func writeMsg(w io.Writer, typ string, body any) error {
-	payload, err := json.Marshal(body)
-	if err != nil {
+func verifyMetadata(reader *aeadReader, digest []byte) error {
+	chunk, err := reader.ReadChunk()
+	switch {
+	case err == io.EOF:
+		return nil
+	case err != nil:
 		return err
 	}
-	env := wire{Type: typ, Body: payload}
-	data, err := json.Marshal(env)
-	if err != nil {
+	if !bytes.HasPrefix(chunk, []byte(metaPrefix)) {
+		return fmt.Errorf("unexpected trailer data")
+	}
+	var meta fileMetadata
+	if err := json.Unmarshal(chunk[len(metaPrefix):], &meta); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(w, "%s\n", data)
-	return err
-}
-
-func readMsg(r *bufio.Reader) (wire, error) {
-	line, err := r.ReadString('\n')
-	if err != nil {
-		return wire{}, err
+	if meta.Hash == "blake3-256" && len(meta.Digest) > 0 {
+		if !hmac.Equal(digest, meta.Digest) {
+			return fmt.Errorf("file hash mismatch")
+		}
 	}
-	line = strings.TrimSpace(line)
-	var env wire
-	if err := json.Unmarshal([]byte(line), &env); err != nil {
-		return wire{}, err
-	}
-	if env.Type == "err" {
-		var e map[string]string
-		_ = json.Unmarshal(env.Body, &e)
-		return wire{}, fmt.Errorf("relay error: %s", e["error"])
-	}
-	return env, nil
-}
-
-type wire struct {
-	Type string          `json:"type"`
-	Body json.RawMessage `json:"body,omitempty"`
+	return nil
 }
 
 func selfSignedTLS() (*tls.Config, error) {
