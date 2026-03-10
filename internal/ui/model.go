@@ -14,10 +14,11 @@ import (
 
 // Session holds the static information about the current workflow.
 type Session struct {
-	Mode  string
-	File  string
-	Relay string
-	Code  string
+	Mode        string
+	File        string
+	Relay       string
+	Code        string
+	ShowNetwork bool
 }
 
 // DoneMsg notifies the UI that the transport run finished.
@@ -170,7 +171,9 @@ func renderSession(s Session) string {
 	rows := []string{
 		fmt.Sprintf("Mode   %s", highlightText.Render(s.Mode)),
 		fmt.Sprintf("File   %s", highlightText.Render(orDash(s.File))),
-		fmt.Sprintf("Relay  %s", highlightText.Render(s.Relay)),
+	}
+	if s.ShowNetwork {
+		rows = append(rows, fmt.Sprintf("Relay  %s", highlightText.Render(orDash(s.Relay))))
 	}
 	if s.Code != "" {
 		rows = append(rows, fmt.Sprintf("Code   %s", highlightText.Render(s.Code)))

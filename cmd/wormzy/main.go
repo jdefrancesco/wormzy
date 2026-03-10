@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -22,18 +24,33 @@ const version = "0.1.0-dev"
 
 func main() {
 	var (
-		mode     = flag.String("mode", "", "send or recv")
-		file     = flag.String("file", "", "file to send (send mode only)")
-		code     = flag.String("code", "", "wormzy pairing code")
-		relay    = flag.String("relay", "127.0.0.1:9999", "rendezvous address")
-		relayPin = flag.String("relay-pin", "", "base64(SHA256(SPKI)) pin for rendezvous TLS")
-		timeout  = flag.Duration("timeout", 60*time.Second, "overall rendezvous timeout")
-		loopback = flag.Bool("dev-loopback", false, "use local addresses for testing")
+		mode        = flag.String("mode", "", "send or recv")
+		file        = flag.String("file", "", "file to send (send mode only)")
+		code        = flag.String("code", "", "wormzy pairing code")
+		relay       = flag.String("relay", "127.0.0.1:9999", "rendezvous address")
+		relayPin    = flag.String("relay-pin", "", "base64(SHA256(SPKI)) pin for rendezvous TLS")
+		timeout     = flag.Duration("timeout", 60*time.Second, "overall rendezvous timeout")
+		loopback    = flag.Bool("dev-loopback", false, "use local addresses for testing")
+		showNetwork = flag.Bool("show-network", false, "display relay/STUN diagnostics in the UI")
 	)
 	flag.Parse()
 
 	if runningUnderGoTest() {
 		return
+	}
+
+	if err := applyCommandArgs(mode, file, code); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	if *mode == "recv" && *code == "" {
+		entered, err := promptForCode()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error reading code:", err)
+			os.Exit(1)
+		}
+		*code = entered
 	}
 
 	if err := validateArgs(*mode, *file); err != nil {
@@ -60,9 +77,10 @@ func main() {
 	}
 
 	session := ui.Session{
-		Mode:  strings.ToUpper(*mode),
-		File:  displayFile(*mode, *file),
-		Relay: *relay,
+		Mode:        strings.ToUpper(*mode),
+		File:        displayFile(*mode, *file),
+		Relay:       *relay,
+		ShowNetwork: *showNetwork,
 	}
 	model := ui.NewModel(session)
 	prog := tea.NewProgram(model, tea.WithAltScreen())
@@ -93,7 +111,7 @@ func validateArgs(mode, file string) error {
 		return fmt.Errorf("mode must be send or recv")
 	}
 	if mode == "send" && file == "" {
-		return fmt.Errorf("send mode requires -file <path>")
+		return fmt.Errorf("send requires a file (wormzy send <file>)")
 	}
 	return nil
 }
@@ -126,4 +144,56 @@ func runHeadless(ctx context.Context, cfg transport.Config) {
 	if result != nil {
 		fmt.Printf("Pairing code: %s\n", result.Code)
 	}
+}
+
+func applyCommandArgs(mode, file, code *string) error {
+	args := flag.Args()
+	if len(args) == 0 {
+		return nil
+	}
+	cmd := args[0]
+	switch cmd {
+	case "send":
+		if *mode != "" && *mode != "send" {
+			return fmt.Errorf("conflicting mode: %s (flag) vs send command", *mode)
+		}
+		*mode = "send"
+		rest := args[1:]
+		if *file == "" {
+			if len(rest) == 0 {
+				return fmt.Errorf("send requires a file argument (wormzy send <file>)")
+			}
+			*file = rest[0]
+			rest = rest[1:]
+		}
+		if len(rest) > 0 {
+			return fmt.Errorf("unexpected arguments for send: %s", strings.Join(rest, " "))
+		}
+	case "recv":
+		if *mode != "" && *mode != "recv" {
+			return fmt.Errorf("conflicting mode: %s (flag) vs recv command", *mode)
+		}
+		*mode = "recv"
+		rest := args[1:]
+		if *code == "" && len(rest) > 0 {
+			*code = rest[0]
+			rest = rest[1:]
+		}
+		if len(rest) > 0 {
+			return fmt.Errorf("unexpected arguments for recv: %s", strings.Join(rest, " "))
+		}
+	default:
+		return fmt.Errorf("unknown command %q", cmd)
+	}
+	return nil
+}
+
+func promptForCode() (string, error) {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("Enter wormzy pairing code: ")
+	code, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	return strings.TrimSpace(code), nil
 }
