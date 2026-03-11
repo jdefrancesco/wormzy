@@ -38,6 +38,14 @@ const (
 	alpn          = "p2p-wormzy-1"
 	defaultRelay  = "127.0.0.1:6379"
 	defaultDialTO = 60 * time.Second
+
+	// Wire-format sizing limits.
+	maxUint16PayloadLen = (1 << 16) - 1
+
+	// File header layout: uint16(nameLen) + uint64(fileSize) + name bytes.
+	fileHeaderNameLenSize = 2
+	fileHeaderSizeSize    = 8
+	fileHeaderFixedLen    = fileHeaderNameLenSize + fileHeaderSizeSize
 )
 
 // Config controls how a Wormzy transfer session behaves.
@@ -403,7 +411,7 @@ func runNoiseOverQUIC(conn *quic.Conn, initiator bool, psk []byte) ([]byte, erro
 	}
 
 	writeFrame := func(b []byte) error {
-		if len(b) > 65535 {
+		if len(b) > maxUint16PayloadLen {
 			return fmt.Errorf("noise frame too large")
 		}
 		var hdr [2]byte
@@ -549,7 +557,7 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) (
 		return nil, 0, fmt.Errorf("path %s is a directory", path)
 	}
 	name := filepath.Base(path)
-	if len(name) > 65535 {
+	if len(name) > maxUint16PayloadLen {
 		return nil, 0, fmt.Errorf("filename too long")
 	}
 	size := fi.Size()
@@ -579,10 +587,10 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) (
 	}
 	writer := &aeadWriter{w: us, aead: aead, baseNonce: base}
 
-	header := make([]byte, 10+len(name))
-	binary.LittleEndian.PutUint16(header[0:2], uint16(len(name)))
-	binary.LittleEndian.PutUint64(header[2:10], uint64(size))
-	copy(header[10:], []byte(name))
+	header := make([]byte, fileHeaderFixedLen+len(name))
+	binary.LittleEndian.PutUint16(header[0:fileHeaderNameLenSize], uint16(len(name)))
+	binary.LittleEndian.PutUint64(header[fileHeaderNameLenSize:fileHeaderFixedLen], uint64(size))
+	copy(header[fileHeaderFixedLen:], []byte(name))
 	if err := writer.WriteChunk(header); err != nil {
 		return nil, 0, err
 	}
@@ -648,15 +656,15 @@ func receiveFile(conn *quic.Conn, key []byte, rep Reporter) (string, []byte, int
 	if err != nil {
 		return "", nil, 0, err
 	}
-	if len(hdr) < 10 {
+	if len(hdr) < fileHeaderFixedLen {
 		return "", nil, 0, fmt.Errorf("invalid header")
 	}
-	nameLen := binary.LittleEndian.Uint16(hdr[0:2])
-	if int(10+nameLen) > len(hdr) {
+	nameLen := binary.LittleEndian.Uint16(hdr[0:fileHeaderNameLenSize])
+	if fileHeaderFixedLen+int(nameLen) > len(hdr) {
 		return "", nil, 0, fmt.Errorf("header truncated")
 	}
-	size := binary.LittleEndian.Uint64(hdr[2:10])
-	name := sanitizeFilename(string(hdr[10 : 10+nameLen]))
+	size := binary.LittleEndian.Uint64(hdr[fileHeaderNameLenSize:fileHeaderFixedLen])
+	name := sanitizeFilename(string(hdr[fileHeaderFixedLen : fileHeaderFixedLen+int(nameLen)]))
 	if name == "" {
 		name = "wormzy-file"
 	}
