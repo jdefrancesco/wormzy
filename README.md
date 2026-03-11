@@ -24,7 +24,7 @@ go run ./cmd/wormzy recv
 # prompted for the pairing code, then the file arrives
 ```
 
-When you deploy a managed Redis instance (recommended), set the endpoint via an env var instead of sprinkling `-relay` flags:
+When you deploy a managed Redis instance (recommended), you can either point Wormzy at it directly or run the new HTTP relay proxy that fronts Redis on your behalf. To talk to Redis directly, set the endpoint via an env var instead of sprinkling `-relay` flags:
 
 ```bash
 export WORMZY_RELAY_URL="rediss://default:<password>@redis-12345.c1.us-east-1-2.ec2.cloud.redislabs.com:25061"
@@ -33,6 +33,19 @@ go run ./cmd/wormzy recv
 ```
 
 `WORMZY_RELAY_URL` takes precedence over CLI flags; fall back to `WORMZY_RELAY` or `-relay` only when you need to override the default.
+
+If you prefer an HTTP endpoint (so clients don’t need Redis access), run the relay proxy:
+
+```bash
+go run ./cmd/mailbox -listen :8080 -redis rediss://default:<password>@redis-12345.c1.us-east-1-2.ec2.cloud.redislabs.com:25061
+```
+
+Then point Wormzy at it:
+
+```bash
+wormzy -relay http://my-relay.example.com:8080 send ./big.bin
+wormzy -relay http://my-relay.example.com:8080 recv
+```
 
 ### Hosting the relay on DigitalOcean Managed Redis
 

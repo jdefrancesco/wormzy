@@ -273,13 +273,13 @@ func DefaultRelay() string {
 }
 
 func rendezvousExchange(ctx context.Context, cfg Config, me rendezvous.SelfInfo, rep Reporter) (peer rendezvous.SelfInfo, assigned string, psk []byte, err error) {
-	mailbox, err := newRedisMailbox(ctx, cfg.RelayAddr, cfg.Timeout, cfg.Mode)
+	mb, err := newMailbox(ctx, cfg)
 	if err != nil {
 		return peer, assigned, nil, err
 	}
-	defer mailbox.Close()
+	defer mb.Close()
 
-	code, err := mailbox.Claim(ctx, cfg.Code)
+	code, err := mb.Claim(ctx, cfg.Code)
 	if err != nil {
 		return peer, assigned, nil, err
 	}
@@ -287,23 +287,23 @@ func rendezvousExchange(ctx context.Context, cfg Config, me rendezvous.SelfInfo,
 	rep.Stage(StageRendezvous, StageStateRunning, "code "+assigned)
 	rep.Logf("rendezvous assigned code %s", assigned)
 
-	if err := mailbox.StoreSelf(ctx, me); err != nil {
+	if err := mb.StoreSelf(ctx, me); err != nil {
 		return peer, assigned, nil, err
 	}
 
-	psk, err = runPAKEOverMailbox(ctx, mailbox, cfg.Mode, assigned, "send", "recv")
+	psk, err = runPAKEOverMailbox(ctx, mb, cfg.Mode, assigned, "send", "recv")
 	if err != nil {
 		return peer, assigned, nil, err
 	}
 
-	peerInfo, err := mailbox.WaitPeer(ctx)
+	peerInfo, err := mb.WaitPeer(ctx)
 	if err != nil {
 		return peer, assigned, nil, err
 	}
 	return *peerInfo, assigned, psk, nil
 }
 
-func runPAKEOverMailbox(ctx context.Context, mb *redisMailbox, role, code, idA, idB string) ([]byte, error) {
+func runPAKEOverMailbox(ctx context.Context, mb mailbox, role, code, idA, idB string) ([]byte, error) {
 	ci := cpace.NewContextInfo(idA, idB, []byte("wormzy-pake-v1"))
 	if role == "send" {
 		msgA, st, err := cpace.Start(code, ci)

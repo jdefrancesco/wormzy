@@ -15,11 +15,6 @@ import (
 	"github.com/jdefrancesco/internal/rendezvous"
 )
 
-type mailboxMessage struct {
-	Type string          `json:"type"`
-	Body json.RawMessage `json:"body,omitempty"`
-}
-
 type redisMailbox struct {
 	client *redis.Client
 	code   string
