@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,6 +33,7 @@ func main() {
 		timeout     = flag.Duration("timeout", 60*time.Second, "overall rendezvous timeout")
 		loopback    = flag.Bool("dev-loopback", false, "use local addresses for testing")
 		showNetwork = flag.Bool("show-network", false, "display relay/STUN diagnostics in the UI")
+		logFile     = flag.String("log-file", "", "append detailed session logs to the given file")
 	)
 	flag.Parse()
 
@@ -58,6 +60,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	var (
+		logCloser    io.Closer
+		fileReporter transport.Reporter
+	)
+	if *logFile != "" {
+		f, err := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "failed to open log file:", err)
+			os.Exit(1)
+		}
+		logCloser = f
+		fileReporter = newFileReporter(f)
+		fmt.Fprintf(os.Stderr, "wormzy: logging detailed output to %s\n", *logFile)
+		defer logCloser.Close()
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -74,7 +92,7 @@ func main() {
 	}
 
 	if !hasTTY() {
-		runHeadless(ctx, cfg)
+		runHeadless(ctx, cfg, fileReporter)
 		return
 	}
 
@@ -87,7 +105,7 @@ func main() {
 	model := ui.NewModel(session)
 	prog := tea.NewProgram(model, tea.WithAltScreen())
 
-	reporter := ui.NewReporter(prog)
+	reporter := combineReporters(ui.NewReporter(prog), fileReporter)
 	done := make(chan error, 1)
 
 	go func() {
@@ -133,11 +151,12 @@ func hasTTY() bool {
 	return isatty.IsTerminal(os.Stdout.Fd()) && isatty.IsTerminal(os.Stdin.Fd())
 }
 
-func runHeadless(ctx context.Context, cfg transport.Config) {
+func runHeadless(ctx context.Context, cfg transport.Config, extra transport.Reporter) {
 	fmt.Println("wormzy: TTY not detected, running without Bubble Tea UI")
-	reporter := transport.ReporterFunc(func(format string, args ...interface{}) {
+	consoleReporter := transport.ReporterFunc(func(format string, args ...interface{}) {
 		fmt.Printf("[wormzy] "+format+"\n", args...)
 	})
+	reporter := combineReporters(consoleReporter, extra)
 	result, err := transport.Run(ctx, cfg, reporter)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -211,4 +230,89 @@ func resolveRelay(flagValue string) string {
 		return env
 	}
 	return transport.DefaultRelay()
+}
+
+func combineReporters(reporters ...transport.Reporter) transport.Reporter {
+	var active []transport.Reporter
+	for _, r := range reporters {
+		if r != nil {
+			active = append(active, r)
+		}
+	}
+	if len(active) == 0 {
+		return nil
+	}
+	return reporterMux{reporters: active}
+}
+
+type reporterMux struct {
+	reporters []transport.Reporter
+}
+
+func (m reporterMux) Logf(format string, args ...interface{}) {
+	for _, r := range m.reporters {
+		if r != nil {
+			r.Logf(format, args...)
+		}
+	}
+}
+
+func (m reporterMux) Stage(stage transport.Stage, state transport.StageState, detail string) {
+	for _, r := range m.reporters {
+		if r != nil {
+			r.Stage(stage, state, detail)
+		}
+	}
+}
+
+func newFileReporter(w io.Writer) transport.Reporter {
+	if w == nil {
+		return nil
+	}
+	return &fileReporter{out: w}
+}
+
+type fileReporter struct {
+	mu  sync.Mutex
+	out io.Writer
+}
+
+func (f *fileReporter) Logf(format string, args ...interface{}) {
+	if f == nil || f.out == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fmt.Fprintf(f.out, "[%s] LOG %s\n", time.Now().Format(time.RFC3339Nano), fmt.Sprintf(format, args...))
+}
+
+func (f *fileReporter) Stage(stage transport.Stage, state transport.StageState, detail string) {
+	if f == nil || f.out == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fmt.Fprintf(
+		f.out,
+		"[%s] STAGE %s %s %s\n",
+		time.Now().Format(time.RFC3339Nano),
+		stage,
+		stageStateString(state),
+		detail,
+	)
+}
+
+func stageStateString(state transport.StageState) string {
+	switch state {
+	case transport.StageStatePending:
+		return "pending"
+	case transport.StageStateRunning:
+		return "running"
+	case transport.StageStateDone:
+		return "done"
+	case transport.StageStateError:
+		return "error"
+	default:
+		return fmt.Sprintf("state(%d)", state)
+	}
 }

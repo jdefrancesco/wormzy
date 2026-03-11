@@ -2,6 +2,7 @@ package transport
 
 import (
 	"errors"
+	"net"
 
 	"github.com/jdefrancesco/internal/rendezvous"
 )
@@ -41,7 +42,7 @@ func buildCandidates(self rendezvous.SelfInfo, loopback bool) []rendezvous.Candi
 	return out
 }
 
-func selectPeerCandidate(peer rendezvous.SelfInfo, loopback bool) (rendezvous.Candidate, error) {
+func selectPeerCandidate(self, peer rendezvous.SelfInfo, loopback bool) (rendezvous.Candidate, error) {
 	if loopback && peer.Local != "" {
 		return rendezvous.Candidate{
 			Type:     "loopback",
@@ -51,23 +52,33 @@ func selectPeerCandidate(peer rendezvous.SelfInfo, loopback bool) (rendezvous.Ca
 		}, nil
 	}
 
+	preferLocal := loopback || samePublicIP(self.Public, peer.Public)
+
 	var (
-		best rendezvous.Candidate
-		ok   bool
+		best      *rendezvous.Candidate
+		bestLocal *rendezvous.Candidate
 	)
 	for _, cand := range peer.Candidates {
 		if cand.Proto != "udp" {
 			continue
 		}
-		if !ok || cand.Priority > best.Priority {
-			best = cand
-			ok = true
+		cand := cand
+		if cand.Type == "local" && preferLocal {
+			if bestLocal == nil || cand.Priority > bestLocal.Priority {
+				bestLocal = &cand
+			}
+		}
+		if best == nil || cand.Priority > best.Priority {
+			best = &cand
 		}
 	}
-	if ok {
-		return best, nil
+	if preferLocal && bestLocal != nil {
+		return *bestLocal, nil
 	}
-	if peer.Public != "" {
+	if best != nil {
+		return *best, nil
+	}
+	if peer.Public != "" && !preferLocal {
 		return rendezvous.Candidate{
 			Type:     "legacy-public",
 			Proto:    "udp",
@@ -84,4 +95,21 @@ func selectPeerCandidate(peer rendezvous.SelfInfo, loopback bool) (rendezvous.Ca
 		}, nil
 	}
 	return rendezvous.Candidate{}, errors.New("peer did not advertise any UDP candidates")
+}
+
+func samePublicIP(a, b string) bool {
+	ha := hostPart(a)
+	hb := hostPart(b)
+	return ha != "" && ha == hb
+}
+
+func hostPart(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return host
 }

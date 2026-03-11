@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -111,7 +112,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (*Result, error) {
 	defer udpConn.Close()
 	reporter.Logf("udp/listen %s", udpConn.LocalAddr())
 
-	self := rendezvous.SelfInfo{Local: udpConn.LocalAddr().String()}
+	self := rendezvous.SelfInfo{Local: localEndpoint(udpConn)}
 	ctxStun, cancelStun := context.WithTimeout(ctx, cfg.Timeout)
 	reporter.Stage(StageSTUN, StageStateRunning, "probing reflexive address")
 	pub, err := stun.DiscoverOnConn(ctxStun, udpConn, cfg.stunServers(), 2*time.Second, 2)
@@ -138,7 +139,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (*Result, error) {
 		reporter.Stage(StageRendezvous, StageStateError, err.Error())
 		return nil, err
 	}
-	chosen, err := selectPeerCandidate(peer, cfg.Loopback)
+	chosen, err := selectPeerCandidate(self, peer, cfg.Loopback)
 	if err != nil {
 		reporter.Stage(StageRendezvous, StageStateError, err.Error())
 		return nil, err
@@ -691,6 +692,63 @@ func sanitizeFilename(s string) string {
 	s = strings.ReplaceAll(s, "/", "_")
 	s = strings.ReplaceAll(s, "\\", "_")
 	return s
+}
+
+func localEndpoint(conn *net.UDPConn) string {
+	if conn == nil {
+		return ""
+	}
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return conn.LocalAddr().String()
+	}
+	ip := addr.IP
+	if ip == nil || ip.IsUnspecified() {
+		if guess := pickLocalIPv4(); guess != nil {
+			ip = guess
+		}
+	}
+	if ip == nil || ip.IsUnspecified() {
+		return addr.String()
+	}
+	return net.JoinHostPort(ip.String(), strconv.Itoa(addr.Port))
+}
+
+func pickLocalIPv4() net.IP {
+	ifaces, err := net.Interfaces()
+	if err == nil {
+		for _, iface := range ifaces {
+			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, addr := range addrs {
+				var ip net.IP
+				switch v := addr.(type) {
+				case *net.IPNet:
+					ip = v.IP
+				case *net.IPAddr:
+					ip = v.IP
+				}
+				if ip = ip.To4(); ip != nil {
+					return ip
+				}
+			}
+		}
+	}
+	conn, err := net.Dial("udp4", "8.8.8.8:80")
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	udp, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return nil
+	}
+	return udp.IP.To4()
 }
 
 func punchLoop(ctx context.Context, conn *net.UDPConn, peer *net.UDPAddr, stop <-chan struct{}) {
