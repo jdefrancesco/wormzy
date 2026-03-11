@@ -1,3 +1,4 @@
+// Package main provides the rendezvous server entrypoint for wormzy.
 package main
 
 import (

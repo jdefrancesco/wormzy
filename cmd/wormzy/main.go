@@ -1,3 +1,7 @@
+//	Wormzy is a super easy. hassle free secure tool for sending and receiving.
+//
+// This is the main entry point for the CLI/TUI application.
+// If you want to know how wormzy works in detail, please refer to the documentation.
 package main
 
 import (
@@ -21,9 +25,11 @@ import (
 	"github.com/jdefrancesco/internal/ui"
 )
 
-const version = "0.1.0-dev"
+const version = "0.1.2-dev"
 
 func main() {
+	// Define command-line flags.
+	// TODOL Use a more modern parsing package with subcommands and SysV flags.
 	var (
 		mode        = flag.String("mode", "", "send or recv")
 		file        = flag.String("file", "", "file to send (send mode only)")
@@ -37,15 +43,18 @@ func main() {
 	)
 	flag.Parse()
 
+	// Avoid starting interactive UI/transfer work during `go test`.
 	if runningUnderGoTest() {
 		return
 	}
 
+	// Support `wormzy send <file>` / `wormzy recv [code]` in addition to flags.
 	if err := applyCommandArgs(mode, file, code); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 
+	// If the pairing code isn't provided, prompt interactively in recv mode.
 	if *mode == "recv" && *code == "" {
 		entered, err := promptForCode()
 		if err != nil {
@@ -55,6 +64,7 @@ func main() {
 		*code = entered
 	}
 
+	// Validate after argument normalization and optional prompting.
 	if err := validateArgs(*mode, *file); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -64,6 +74,8 @@ func main() {
 		logCloser    io.Closer
 		fileReporter transport.Reporter
 	)
+
+	// Logging if needed
 	if *logFile != "" {
 		f, err := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
@@ -76,11 +88,14 @@ func main() {
 		defer logCloser.Close()
 	}
 
+	//  Here we setup context.Cancel the transfer on SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Resolve relay address from flag/env/default.
 	relayAddr := resolveRelay(*relay)
 
+	// Transport config is the single source of truth for the session.
 	cfg := transport.Config{
 		Mode:      *mode,
 		FilePath:  *file,
@@ -91,11 +106,13 @@ func main() {
 		Loopback:  *loopback,
 	}
 
+	// If we don't have an interactive terminal, run without the Bubble Tea UI.
 	if !hasTTY() {
 		runHeadless(ctx, cfg, fileReporter)
 		return
 	}
 
+	// Start the TUI and run the transfer concurrently.
 	session := ui.Session{
 		Mode:        strings.ToUpper(*mode),
 		File:        displayFile(*mode, *file),
@@ -105,10 +122,12 @@ func main() {
 	model := ui.NewModel(session)
 	prog := tea.NewProgram(model, tea.WithAltScreen())
 
+	// Fan out transport reporting to the UI and the optional log file.
 	reporter := combineReporters(ui.NewReporter(prog), fileReporter)
 	done := make(chan error, 1)
 
 	go func() {
+		// Run the transport in the background and notify the UI when it finishes.
 		result, err := transport.Run(ctx, cfg, reporter)
 		done <- err
 		prog.Send(ui.DoneMsg{Result: result, Err: err})
@@ -119,6 +138,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Ensure the background transfer is canceled even if the UI exits first.
 	stop()
 
 	if err := <-done; err != nil {
@@ -126,6 +146,7 @@ func main() {
 	}
 }
 
+// validateArgs checks required arguments for the chosen mode.
 func validateArgs(mode, file string) error {
 	if mode != "send" && mode != "recv" {
 		return fmt.Errorf("mode must be send or recv")
@@ -136,6 +157,7 @@ func validateArgs(mode, file string) error {
 	return nil
 }
 
+// displayFile returns a UI-friendly label for the file being transferred.
 func displayFile(mode, file string) string {
 	if mode != "send" || file == "" {
 		return "waiting for manifest"
@@ -143,14 +165,17 @@ func displayFile(mode, file string) string {
 	return filepath.Base(file)
 }
 
+// runningUnderGoTest reports whether we're running under `go test`.
 func runningUnderGoTest() bool {
 	return flag.Lookup("test.v") != nil
 }
 
+// hasTTY reports whether stdin/stdout are interactive terminals.
 func hasTTY() bool {
 	return isatty.IsTerminal(os.Stdout.Fd()) && isatty.IsTerminal(os.Stdin.Fd())
 }
 
+// runHeadless runs the transport with console output when no TTY is available.
 func runHeadless(ctx context.Context, cfg transport.Config, extra transport.Reporter) {
 	fmt.Println("wormzy: TTY not detected, running without Bubble Tea UI")
 	consoleReporter := transport.ReporterFunc(func(format string, args ...interface{}) {
@@ -176,6 +201,7 @@ func runHeadless(ctx context.Context, cfg transport.Config, extra transport.Repo
 	}
 }
 
+// applyCommandArgs maps positional subcommands into the flag-backed variables.
 func applyCommandArgs(mode, file, code *string) error {
 	args := flag.Args()
 	if len(args) == 0 {
@@ -218,6 +244,7 @@ func applyCommandArgs(mode, file, code *string) error {
 	return nil
 }
 
+// promptForCode reads a pairing code from stdin.
 func promptForCode() (string, error) {
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Print("Enter wormzy pairing code: ")
@@ -228,6 +255,7 @@ func promptForCode() (string, error) {
 	return strings.TrimSpace(code), nil
 }
 
+// resolveRelay determines the rendezvous relay address.
 func resolveRelay(flagValue string) string {
 	if flagValue != "" {
 		return flagValue
@@ -241,6 +269,7 @@ func resolveRelay(flagValue string) string {
 	return transport.DefaultRelay()
 }
 
+// combineReporters fans out reporting to all non-nil reporters.
 func combineReporters(reporters ...transport.Reporter) transport.Reporter {
 	var active []transport.Reporter
 	for _, r := range reporters {
@@ -274,6 +303,7 @@ func (m reporterMux) Stage(stage transport.Stage, state transport.StageState, de
 	}
 }
 
+// newFileReporter creates a reporter that appends detailed logs to w.
 func newFileReporter(w io.Writer) transport.Reporter {
 	if w == nil {
 		return nil
@@ -311,6 +341,7 @@ func (f *fileReporter) Stage(stage transport.Stage, state transport.StageState, 
 	)
 }
 
+// stageStateString provides stable strings for stage state logs.
 func stageStateString(state transport.StageState) string {
 	switch state {
 	case transport.StageStatePending:

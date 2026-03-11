@@ -1,3 +1,4 @@
+// STUNCheck is a simple tool to check if I am using it correctly.
 package main
 
 import (
