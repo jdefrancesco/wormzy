@@ -1,11 +1,10 @@
 .DS_Store
 .vscode/
+gocache/
 node_modules/
 hack/
 dist/
 .env
-*.log
-*.zip
 stun.test
 mvp/
-wormzy
+/wormzy

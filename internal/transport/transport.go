@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,8 +54,12 @@ type Config struct {
 
 // Result reports information about the established session.
 type Result struct {
-	Code string
-	Peer rendezvous.SelfInfo
+	Code     string
+	Peer     rendezvous.SelfInfo
+	Mode     string
+	FilePath string
+	FileSize int64
+	FileHash string
 }
 
 // Reporter receives human-readable log lines describing progress.
@@ -218,27 +223,35 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (*Result, error) {
 	}
 	reporter.Stage(StageNoise, StageStateDone, "session keys derived")
 
+	result := &Result{Code: code, Peer: peer, Mode: cfg.Mode}
 	switch cfg.Mode {
 	case "send":
 		reporter.Stage(StageTransfer, StageStateRunning, "streaming file")
-		if err := sendFileEncrypted(quicConn, cfg.FilePath, fileKey, reporter); err != nil {
-			reporter.Stage(StageTransfer, StageStateError, err.Error())
-			return nil, err
-		}
-		reporter.Logf("transfer complete")
-		reporter.Stage(StageTransfer, StageStateDone, "file sent")
-	case "recv":
-		reporter.Stage(StageTransfer, StageStateRunning, "receiving file")
-		path, err := receiveFile(quicConn, fileKey, reporter)
+		sum, size, err := sendFileEncrypted(quicConn, cfg.FilePath, fileKey, reporter)
 		if err != nil {
 			reporter.Stage(StageTransfer, StageStateError, err.Error())
 			return nil, err
 		}
+		result.FilePath = cfg.FilePath
+		result.FileSize = size
+		result.FileHash = hex.EncodeToString(sum)
+		reporter.Logf("transfer complete")
+		reporter.Stage(StageTransfer, StageStateDone, "file sent")
+	case "recv":
+		reporter.Stage(StageTransfer, StageStateRunning, "receiving file")
+		path, sum, size, err := receiveFile(quicConn, fileKey, reporter)
+		if err != nil {
+			reporter.Stage(StageTransfer, StageStateError, err.Error())
+			return nil, err
+		}
+		result.FilePath = path
+		result.FileSize = size
+		result.FileHash = hex.EncodeToString(sum)
 		reporter.Logf("saved file to %s", path)
 		reporter.Stage(StageTransfer, StageStateDone, path)
 	}
 
-	return &Result{Code: code, Peer: peer}, nil
+	return result, nil
 }
 
 func (cfg Config) withDefaults() Config {
@@ -527,42 +540,42 @@ func (r *aeadReader) ReadChunk() ([]byte, error) {
 	return pt, nil
 }
 
-func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) error {
+func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) ([]byte, int64, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 	if fi.IsDir() {
-		return fmt.Errorf("path %s is a directory", path)
+		return nil, 0, fmt.Errorf("path %s is a directory", path)
 	}
 	name := filepath.Base(path)
 	if len(name) > 65535 {
-		return fmt.Errorf("filename too long")
+		return nil, 0, fmt.Errorf("filename too long")
 	}
 	size := fi.Size()
 
 	file, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 	defer file.Close()
 
 	us, err := conn.OpenUniStreamSync(context.Background())
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 	defer us.Close()
 
 	aead, err := chacha20poly1305.NewX(key)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 	var base [24]byte
 	if _, err := rand.Read(base[:]); err != nil {
-		return err
+		return nil, 0, err
 	}
 	if _, err := us.Write(base[:]); err != nil {
-		return err
+		return nil, 0, err
 	}
 	writer := &aeadWriter{w: us, aead: aead, baseNonce: base}
 
@@ -571,7 +584,7 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) e
 	binary.LittleEndian.PutUint64(header[2:10], uint64(size))
 	copy(header[10:], []byte(name))
 	if err := writer.WriteChunk(header); err != nil {
-		return err
+		return nil, 0, err
 	}
 
 	hasher := blake3.New()
@@ -584,7 +597,7 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) e
 		if n > 0 {
 			hasher.Write(buf[:n])
 			if err := writer.WriteChunk(buf[:n]); err != nil {
-				return err
+				return nil, 0, err
 			}
 			sent += int64(n)
 			reportTransferProgress(rep, "Sending", sent, size, &lastPct)
@@ -593,7 +606,7 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) e
 			break
 		}
 		if er != nil {
-			return er
+			return nil, 0, er
 		}
 	}
 	// Ensure we report 100% once data is flushed.
@@ -606,41 +619,41 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) e
 	}
 	payload, err := json.Marshal(meta)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
 	if err := writer.WriteChunk(append([]byte(metaPrefix), payload...)); err != nil {
-		return err
+		return nil, 0, err
 	}
-	return nil
+	return meta.Digest, size, nil
 }
 
-func receiveFile(conn *quic.Conn, key []byte, rep Reporter) (string, error) {
+func receiveFile(conn *quic.Conn, key []byte, rep Reporter) (string, []byte, int64, error) {
 	stream, err := conn.AcceptUniStream(context.Background())
 	if err != nil {
-		return "", err
+		return "", nil, 0, err
 	}
 	defer stream.CancelRead(0)
 
 	var base [24]byte
 	if _, err := io.ReadFull(stream, base[:]); err != nil {
-		return "", err
+		return "", nil, 0, err
 	}
 	aead, err := chacha20poly1305.NewX(key)
 	if err != nil {
-		return "", err
+		return "", nil, 0, err
 	}
 	reader := &aeadReader{r: stream, aead: aead, baseNonce: base}
 
 	hdr, err := reader.ReadChunk()
 	if err != nil {
-		return "", err
+		return "", nil, 0, err
 	}
 	if len(hdr) < 10 {
-		return "", fmt.Errorf("invalid header")
+		return "", nil, 0, fmt.Errorf("invalid header")
 	}
 	nameLen := binary.LittleEndian.Uint16(hdr[0:2])
 	if int(10+nameLen) > len(hdr) {
-		return "", fmt.Errorf("header truncated")
+		return "", nil, 0, fmt.Errorf("header truncated")
 	}
 	size := binary.LittleEndian.Uint64(hdr[2:10])
 	name := sanitizeFilename(string(hdr[10 : 10+nameLen]))
@@ -650,7 +663,7 @@ func receiveFile(conn *quic.Conn, key []byte, rep Reporter) (string, error) {
 
 	out, err := os.Create(name)
 	if err != nil {
-		return "", err
+		return "", nil, 0, err
 	}
 	defer out.Close()
 
@@ -664,11 +677,11 @@ func receiveFile(conn *quic.Conn, key []byte, rep Reporter) (string, error) {
 			break
 		}
 		if err != nil {
-			return "", err
+			return "", nil, 0, err
 		}
 		hasher.Write(chunk)
 		if _, err := out.Write(chunk); err != nil {
-			return "", err
+			return "", nil, 0, err
 		}
 		written += uint64(len(chunk))
 		reportTransferProgress(rep, "Receiving", int64(written), int64(size), &lastPct)
@@ -678,14 +691,14 @@ func receiveFile(conn *quic.Conn, key []byte, rep Reporter) (string, error) {
 	}
 	reportTransferProgress(rep, "Receiving", int64(size), int64(size), &lastPct)
 	if written != size {
-		return "", fmt.Errorf("expected %d bytes, wrote %d", size, written)
+		return "", nil, 0, fmt.Errorf("expected %d bytes, wrote %d", size, written)
 	}
 
 	sum := hasher.Sum(nil)
 	if err := verifyMetadata(reader, sum); err != nil {
-		return "", err
+		return "", nil, 0, err
 	}
-	return out.Name(), nil
+	return out.Name(), sum, int64(size), nil
 }
 
 func sanitizeFilename(s string) string {

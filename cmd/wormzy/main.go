@@ -164,6 +164,15 @@ func runHeadless(ctx context.Context, cfg transport.Config, extra transport.Repo
 	}
 	if result != nil {
 		fmt.Printf("Pairing code: %s\n", result.Code)
+		if result.FilePath != "" {
+			fmt.Printf("File: %s\n", result.FilePath)
+		}
+		if result.FileSize > 0 {
+			fmt.Printf("Size: %d bytes\n", result.FileSize)
+		}
+		if result.FileHash != "" {
+			fmt.Printf("BLAKE3-256: %s\n", result.FileHash)
+		}
 	}
 }
 

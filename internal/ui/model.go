@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -49,6 +50,7 @@ type Model struct {
 	progress float64
 	err      error
 	done     bool
+	result   *transport.Result
 }
 
 type step struct {
@@ -109,11 +111,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.done = true
 		if msg.Result != nil {
 			m.session.Code = msg.Result.Code
+			m.result = msg.Result
 		}
 		switch {
 		case msg.Err == nil:
 			m.err = nil
-			return m, tea.Quit
+			return m, nil
 		case errors.Is(msg.Err, context.Canceled):
 			m.err = nil
 			return m, tea.Quit
@@ -140,6 +143,9 @@ func (m Model) View() string {
 	b.WriteString("\n")
 	if m.err != nil {
 		b.WriteString(renderIssuePanel(m.err))
+		b.WriteString("\n")
+	} else if m.done && m.result != nil {
+		b.WriteString(renderSuccessPanel(m.result))
 		b.WriteString("\n")
 	}
 	b.WriteString(renderFooter(m.done, m.err))
@@ -213,6 +219,26 @@ func renderIssuePanel(err error) string {
 	return issueBoxStyle.Render(strings.Join(lines, "\n"))
 }
 
+func renderSuccessPanel(res *transport.Result) string {
+	if res == nil {
+		return ""
+	}
+	lines := []string{
+		successTitleStyle.Render("Transfer complete"),
+		fmt.Sprintf("File   %s", highlightText.Render(orDash(filepath.Base(res.FilePath)))),
+	}
+	if res.FileSize > 0 {
+		lines = append(lines, fmt.Sprintf("Size   %s", highlightText.Render(formatSize(res.FileSize))))
+	}
+	if res.FileHash != "" {
+		lines = append(lines, fmt.Sprintf("Hash   %s", highlightText.Render(res.FileHash)))
+	}
+	lines = append(lines, fmt.Sprintf("Code   %s", highlightText.Render(orDash(res.Code))))
+	lines = append(lines, "")
+	lines = append(lines, subtleStyle.Render("Press q to exit"))
+	return successBoxStyle.Render(strings.Join(lines, "\n"))
+}
+
 func suggestionsForError(err error) []string {
 	msg := strings.ToLower(err.Error())
 	switch {
@@ -281,6 +307,19 @@ func stepIcon(state transport.StageState) string {
 	}
 }
 
+func formatSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
 func orDash(s string) string {
 	if s == "" {
 		return "—"
@@ -289,14 +328,16 @@ func orDash(s string) string {
 }
 
 var (
-	headerStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5FD2")).MarginBottom(1)
-	boxStyle        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).BorderForeground(lipgloss.Color("#555555"))
-	issueBoxStyle   = lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(0, 1).BorderForeground(lipgloss.Color("#FF5F87"))
-	stepTitleStyle  = lipgloss.NewStyle().Bold(true)
-	highlightText   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00D7FF"))
-	subtleStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#777777"))
-	accentStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#5DFFB4"))
-	successStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#5DFF8D"))
-	errorStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5F87"))
-	issueTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5F87"))
+	headerStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5FD2")).MarginBottom(1)
+	boxStyle          = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).BorderForeground(lipgloss.Color("#555555"))
+	issueBoxStyle     = lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(0, 1).BorderForeground(lipgloss.Color("#FF5F87"))
+	successBoxStyle   = lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(0, 1).BorderForeground(lipgloss.Color("#5DFF8D"))
+	stepTitleStyle    = lipgloss.NewStyle().Bold(true)
+	highlightText     = lipgloss.NewStyle().Foreground(lipgloss.Color("#00D7FF"))
+	subtleStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#777777"))
+	accentStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#5DFFB4"))
+	successStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#5DFF8D"))
+	successTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#5DFF8D"))
+	errorStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5F87"))
+	issueTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5F87"))
 )
