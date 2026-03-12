@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"net"
 	"os"
@@ -58,16 +59,19 @@ type Config struct {
 	STUNServers []string
 	Timeout     time.Duration
 	Loopback    bool
+	DownloadDir string
 }
 
 // Result reports information about the established session.
 type Result struct {
-	Code     string
-	Peer     rendezvous.SelfInfo
-	Mode     string
-	FilePath string
-	FileSize int64
-	FileHash string
+	Code      string
+	Peer      rendezvous.SelfInfo
+	Mode      string
+	FilePath  string
+	FileSize  int64
+	FileHash  string
+	Transport string
+	Candidate string
 }
 
 // Reporter receives human-readable log lines describing progress.
@@ -108,7 +112,7 @@ func (f ReporterFunc) Logf(format string, args ...interface{}) {
 func (f ReporterFunc) Stage(stage Stage, state StageState, detail string) {}
 
 // Run executes a full rendezvous + NAT punching flow for the configured mode.
-func Run(ctx context.Context, cfg Config, rep Reporter) (*Result, error) {
+func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr error) {
 	reporter := rep
 	if reporter == nil {
 		reporter = ReporterFunc(func(string, ...interface{}) {})
@@ -146,10 +150,18 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (*Result, error) {
 	}
 	self.Candidates = buildCandidates(self, cfg.Loopback)
 
+	mbox, err := newMailbox(ctx, cfg)
+	if err != nil {
+		finalErr = err
+		return nil, err
+	}
+	defer mbox.Close()
+
 	reporter.Stage(StageRendezvous, StageStateRunning, "dialing relay")
-	peer, code, psk, err := rendezvousExchange(ctx, cfg, self, reporter)
+	peer, code, psk, err := rendezvousExchange(ctx, cfg, self, reporter, mbox)
 	if err != nil {
 		reporter.Stage(StageRendezvous, StageStateError, err.Error())
+		finalErr = err
 		return nil, err
 	}
 	chosen, err := selectPeerCandidate(self, peer, cfg.Loopback)
@@ -159,6 +171,24 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (*Result, error) {
 	}
 	reporter.Stage(StageRendezvous, StageStateDone, fmt.Sprintf("%s (%s)", chosen.Addr, chosen.Type))
 	reporter.Logf("paired with code %s", code)
+
+	stats := transferStats{
+		Mode:      cfg.Mode,
+		Candidate: chosen.Type,
+		Transport: transportLabelForCandidate(chosen),
+	}
+	defer func() {
+		if mbox == nil {
+			return
+		}
+		stats.Completed = finalErr == nil
+		if finalErr != nil {
+			stats.Error = finalErr.Error()
+		}
+		if err := mbox.ReportStats(ctx, stats); err != nil {
+			reporter.Logf("report stats failed: %v", err)
+		}
+	}()
 
 	peerAddr := chosen.Addr
 	peerUDP, err := net.ResolveUDPAddr("udp4", peerAddr)
@@ -224,14 +254,18 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (*Result, error) {
 	punchWG.Wait()
 
 	reporter.Stage(StageNoise, StageStateRunning, "noise handshake")
-	fileKey, err := runNoiseOverQUIC(quicConn, cfg.Mode == "recv", psk)
+	fileKey, sas, err := runNoiseOverQUIC(quicConn, cfg.Mode == "recv", psk)
 	if err != nil {
 		reporter.Stage(StageNoise, StageStateError, err.Error())
 		return nil, err
 	}
-	reporter.Stage(StageNoise, StageStateDone, "session keys derived")
+	reporter.Logf("noise handshake SAS %s", sas)
+	reporter.Stage(StageNoise, StageStateDone, fmt.Sprintf("confirm SAS %s", sas))
 
-	result := &Result{Code: code, Peer: peer, Mode: cfg.Mode}
+	res = &Result{Code: code, Peer: peer, Mode: cfg.Mode}
+	res.Transport = stats.Transport
+	res.Candidate = stats.Candidate
+
 	switch cfg.Mode {
 	case "send":
 		reporter.Stage(StageTransfer, StageStateRunning, "streaming file")
@@ -240,26 +274,26 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (*Result, error) {
 			reporter.Stage(StageTransfer, StageStateError, err.Error())
 			return nil, err
 		}
-		result.FilePath = cfg.FilePath
-		result.FileSize = size
-		result.FileHash = hex.EncodeToString(sum)
+		res.FilePath = cfg.FilePath
+		res.FileSize = size
+		res.FileHash = hex.EncodeToString(sum)
 		reporter.Logf("transfer complete")
 		reporter.Stage(StageTransfer, StageStateDone, "file sent")
 	case "recv":
 		reporter.Stage(StageTransfer, StageStateRunning, "receiving file")
-		path, sum, size, err := receiveFile(quicConn, fileKey, reporter)
+		path, sum, size, err := receiveFile(quicConn, fileKey, cfg.DownloadDir, reporter)
 		if err != nil {
 			reporter.Stage(StageTransfer, StageStateError, err.Error())
 			return nil, err
 		}
-		result.FilePath = path
-		result.FileSize = size
-		result.FileHash = hex.EncodeToString(sum)
+		res.FilePath = path
+		res.FileSize = size
+		res.FileHash = hex.EncodeToString(sum)
 		reporter.Logf("saved file to %s", path)
 		reporter.Stage(StageTransfer, StageStateDone, path)
 	}
 
-	return result, nil
+	return res, nil
 }
 
 func (cfg Config) withDefaults() Config {
@@ -294,13 +328,7 @@ func DefaultRelay() string {
 	return defaultRelay
 }
 
-func rendezvousExchange(ctx context.Context, cfg Config, me rendezvous.SelfInfo, rep Reporter) (peer rendezvous.SelfInfo, assigned string, psk []byte, err error) {
-	mb, err := newMailbox(ctx, cfg)
-	if err != nil {
-		return peer, assigned, nil, err
-	}
-	defer mb.Close()
-
+func rendezvousExchange(ctx context.Context, cfg Config, me rendezvous.SelfInfo, rep Reporter, mb mailbox) (peer rendezvous.SelfInfo, assigned string, psk []byte, err error) {
 	code, err := mb.Claim(ctx, cfg.Code)
 	if err != nil {
 		return peer, assigned, nil, err
@@ -384,7 +412,7 @@ func runPAKEOverMailbox(ctx context.Context, mb mailbox, role, code, idA, idB st
 	return keyB, nil
 }
 
-func runNoiseOverQUIC(conn *quic.Conn, initiator bool, psk []byte) ([]byte, error) {
+func runNoiseOverQUIC(conn *quic.Conn, initiator bool, psk []byte) ([]byte, string, error) {
 	var stream *quic.Stream
 	var err error
 	ctx := context.Background()
@@ -394,7 +422,7 @@ func runNoiseOverQUIC(conn *quic.Conn, initiator bool, psk []byte) ([]byte, erro
 		stream, err = conn.AcceptStream(ctx)
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer stream.Close()
 
@@ -407,7 +435,7 @@ func runNoiseOverQUIC(conn *quic.Conn, initiator bool, psk []byte) ([]byte, erro
 		Random:      rand.Reader,
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	writeFrame := func(b []byte) error {
@@ -438,38 +466,38 @@ func runNoiseOverQUIC(conn *quic.Conn, initiator bool, psk []byte) ([]byte, erro
 	if initiator {
 		msg1, _, _, err := hs.WriteMessage(nil, nil)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		appendTranscript(msg1)
 		if err := writeFrame(msg1); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 
 		in2, err := readFrame()
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		appendTranscript(in2)
 		if _, _, _, err := hs.ReadMessage(nil, in2); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	} else {
 		in1, err := readFrame()
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		appendTranscript(in1)
 		if _, _, _, err := hs.ReadMessage(nil, in1); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 
 		msg2, _, _, err := hs.WriteMessage(nil, nil)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		appendTranscript(msg2)
 		if err := writeFrame(msg2); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
 
@@ -477,9 +505,10 @@ func runNoiseOverQUIC(conn *quic.Conn, initiator bool, psk []byte) ([]byte, erro
 	fileKey := make([]byte, chacha20poly1305.KeySize)
 	kdf := hkdf.New(sha256.New, psk, th[:], []byte("wormzy-filekey-v1"))
 	if _, err := io.ReadFull(kdf, fileKey); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return fileKey, nil
+	sas := deriveSAS(transcript, psk)
+	return fileKey, sas, nil
 }
 
 type cipherAEAD interface {
@@ -603,7 +632,9 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) (
 	for {
 		n, er := file.Read(buf)
 		if n > 0 {
-			hasher.Write(buf[:n])
+			if _, err := hasher.Write(buf[:n]); err != nil {
+				return nil, 0, err
+			}
 			if err := writer.WriteChunk(buf[:n]); err != nil {
 				return nil, 0, err
 			}
@@ -635,7 +666,7 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) (
 	return meta.Digest, size, nil
 }
 
-func receiveFile(conn *quic.Conn, key []byte, rep Reporter) (string, []byte, int64, error) {
+func receiveFile(conn *quic.Conn, key []byte, downloadDir string, rep Reporter) (string, []byte, int64, error) {
 	stream, err := conn.AcceptUniStream(context.Background())
 	if err != nil {
 		return "", nil, 0, err
@@ -669,7 +700,16 @@ func receiveFile(conn *quic.Conn, key []byte, rep Reporter) (string, []byte, int
 		name = "wormzy-file"
 	}
 
-	out, err := os.Create(name)
+	targetDir := downloadDir
+	if targetDir == "" {
+		targetDir = "."
+	}
+	if err := ensureFreeSpace(targetDir, size); err != nil {
+		return "", nil, 0, err
+	}
+	outPath := filepath.Join(targetDir, name)
+
+	out, err := os.Create(outPath)
 	if err != nil {
 		return "", nil, 0, err
 	}
@@ -687,17 +727,19 @@ func receiveFile(conn *quic.Conn, key []byte, rep Reporter) (string, []byte, int
 		if err != nil {
 			return "", nil, 0, err
 		}
-		hasher.Write(chunk)
+		if _, err := hasher.Write(chunk); err != nil {
+			return "", nil, 0, err
+		}
 		if _, err := out.Write(chunk); err != nil {
 			return "", nil, 0, err
 		}
 		written += uint64(len(chunk))
-		reportTransferProgress(rep, "Receiving", int64(written), int64(size), &lastPct)
+		reportTransferProgress(rep, "Receiving", clampInt64(written), clampInt64(size), &lastPct)
 		if written >= size {
 			break
 		}
 	}
-	reportTransferProgress(rep, "Receiving", int64(size), int64(size), &lastPct)
+	reportTransferProgress(rep, "Receiving", clampInt64(size), clampInt64(size), &lastPct)
 	if written != size {
 		return "", nil, 0, fmt.Errorf("expected %d bytes, wrote %d", size, written)
 	}
@@ -706,7 +748,7 @@ func receiveFile(conn *quic.Conn, key []byte, rep Reporter) (string, []byte, int
 	if err := verifyMetadata(reader, sum); err != nil {
 		return "", nil, 0, err
 	}
-	return out.Name(), sum, int64(size), nil
+	return outPath, sum, clampInt64(size), nil
 }
 
 func sanitizeFilename(s string) string {
@@ -770,6 +812,31 @@ func pickLocalIPv4() net.IP {
 		return nil
 	}
 	return udp.IP.To4()
+}
+
+func ensureFreeSpace(dir string, needed uint64) error {
+	avail, err := diskFreeBytes(dir)
+	if err != nil {
+		return fmt.Errorf("checking disk space: %w", err)
+	}
+	if avail < needed {
+		return fmt.Errorf("insufficient disk space in %q (need %s, have %s)", dir, formatBytes(clampInt64(needed)), formatBytes(clampInt64(avail)))
+	}
+	return nil
+}
+
+func transportLabelForCandidate(cand rendezvous.Candidate) string {
+	if strings.Contains(strings.ToLower(cand.Type), "relay") {
+		return "relay"
+	}
+	return "p2p"
+}
+
+func deriveSAS(transcript []byte, psk []byte) string {
+	sum := blake3.Sum256(append(transcript, psk...))
+	lo := binary.BigEndian.Uint16(sum[0:2]) % 10000
+	hi := binary.BigEndian.Uint16(sum[2:4]) % 10000
+	return fmt.Sprintf("%04d-%04d", hi, lo)
 }
 
 func punchLoop(ctx context.Context, conn *net.UDPConn, peer *net.UDPAddr, stop <-chan struct{}) {
@@ -867,4 +934,11 @@ func formatBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+func clampInt64(v uint64) int64 {
+	if v > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(v)
 }

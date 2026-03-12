@@ -3,13 +3,14 @@ package rendezvous
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"math/rand/v2"
+	"math/big"
 	"net"
 	"strings"
 	"sync"
@@ -300,7 +301,11 @@ func (s *Server) log() *slog.Logger {
 }
 
 func defaultCode() string {
-	val := rand.Uint32()
+	n, err := rand.Int(rand.Reader, big.NewInt(1<<24))
+	if err != nil {
+		return fmt.Sprintf("%06x", time.Now().UnixNano()%0xffffff)
+	}
+	val := n.Uint64()
 	return fmt.Sprintf("%04x-%02x", val&0xffff, (val>>16)&0xff)
 }
 

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"time"
 
 	miniredis "github.com/alicebob/miniredis/v2"
@@ -22,6 +21,8 @@ type redisMailbox struct {
 	prefix string
 	role   string
 	stop   func()
+
+	store *sessionStore
 }
 
 func newRedisMailbox(ctx context.Context, addr string, ttl time.Duration, role string) (*redisMailbox, error) {
@@ -40,11 +41,17 @@ func newRedisMailbox(ctx context.Context, addr string, ttl time.Duration, role s
 		}
 		return startEmbeddedMailbox(ttl, role)
 	}
+	return newRedisMailboxWithClient(client, ttl, role, nil)
+}
+
+func newRedisMailboxWithClient(client *redis.Client, ttl time.Duration, role string, stop func()) (*redisMailbox, error) {
 	return &redisMailbox{
 		client: client,
 		ttl:    ttl,
 		prefix: "wormzy",
 		role:   role,
+		stop:   stop,
+		store:  newSessionStore(client, ttl, "wormzy"),
 	}, nil
 }
 
@@ -80,32 +87,33 @@ func startEmbeddedMailbox(ttl time.Duration, role string) (*redisMailbox, error)
 		return nil, fmt.Errorf("embedded redis unavailable: %w", err)
 	}
 	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
-	return &redisMailbox{
-		client: client,
-		ttl:    ttl,
-		prefix: "wormzy",
-		role:   role,
-		stop: func() {
-			mini.Close()
-		},
-	}, nil
+	return newRedisMailboxWithClient(client, ttl, role, mini.Close)
 }
 
 func (m *redisMailbox) Claim(ctx context.Context, requested string) (string, error) {
 	if m.role == "send" {
-		if requested == "" {
-			requested = rendezvous.GenerateCode()
+		code := requested
+		for {
+			if code == "" {
+				code = rendezvous.GenerateCode()
+			}
+			_, err := m.store.registerSender(ctx, code)
+			if err == nil {
+				m.code = code
+				return code, nil
+			}
+			if !errors.Is(err, errSenderInUse) || requested != "" {
+				return "", err
+			}
+			code = ""
 		}
-		if err := m.claimSender(ctx, requested); err != nil {
-			return "", err
-		}
-	} else {
-		if requested == "" {
-			return "", fmt.Errorf("receiver requires a pairing code")
-		}
-		if err := m.claimReceiver(ctx, requested); err != nil {
-			return "", err
-		}
+	}
+
+	if requested == "" {
+		return "", fmt.Errorf("receiver requires a pairing code")
+	}
+	if _, err := m.store.registerReceiver(ctx, requested); err != nil {
+		return "", err
 	}
 	m.code = requested
 	return requested, nil
@@ -115,43 +123,14 @@ func (m *redisMailbox) StoreSelf(ctx context.Context, info rendezvous.SelfInfo) 
 	if m.code == "" {
 		return fmt.Errorf("mailbox code not set")
 	}
-	data, err := json.Marshal(info)
-	if err != nil {
-		return err
-	}
-	key := m.key("self", m.role)
-	return m.client.Set(ctx, key, data, m.ttl).Err()
+	return m.store.updatePeerInfo(ctx, m.code, m.role, info)
 }
 
 func (m *redisMailbox) WaitPeer(ctx context.Context) (*rendezvous.SelfInfo, error) {
 	if m.code == "" {
 		return nil, fmt.Errorf("mailbox code not set")
 	}
-	var peerRole string
-	if m.role == "send" {
-		peerRole = "recv"
-	} else {
-		peerRole = "send"
-	}
-	key := m.key("self", peerRole)
-	for {
-		data, err := m.client.Get(ctx, key).Bytes()
-		if err == nil {
-			var info rendezvous.SelfInfo
-			if err := json.Unmarshal(data, &info); err != nil {
-				return nil, err
-			}
-			return &info, nil
-		}
-		if err != redis.Nil {
-			return nil, err
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(200 * time.Millisecond):
-		}
-	}
+	return m.store.waitForPeer(ctx, m.code, m.role)
 }
 
 func (m *redisMailbox) Send(ctx context.Context, typ string, body any) error {
@@ -162,135 +141,31 @@ func (m *redisMailbox) Send(ctx context.Context, typ string, body any) error {
 	if err != nil {
 		return err
 	}
-	env := mailboxMessage{Type: typ, Body: raw}
-	payload, err := json.Marshal(env)
-	if err != nil {
-		return err
-	}
-	key := m.outboundKey()
-	return m.client.RPush(ctx, key, payload).Err()
+	msg := mailboxMessage{Type: typ, Body: raw}
+	dest := oppositeRole(m.role)
+	return m.store.enqueue(ctx, m.code, dest, msg)
 }
 
 func (m *redisMailbox) Receive(ctx context.Context) (mailboxMessage, error) {
 	if m.code == "" {
 		return mailboxMessage{}, fmt.Errorf("mailbox code not set")
 	}
-	key := m.inboundKey()
-	for {
-		res, err := m.client.BLPop(ctx, m.ttl, key).Result()
-		if err != nil {
-			if err == redis.Nil {
-				continue
-			}
-			return mailboxMessage{}, err
-		}
-		if len(res) < 2 {
-			continue
-		}
-		var msg mailboxMessage
-		if err := json.Unmarshal([]byte(res[1]), &msg); err != nil {
-			return mailboxMessage{}, err
-		}
-		return msg, nil
+	return m.store.dequeue(ctx, m.code, m.role)
+}
+
+func (m *redisMailbox) ReportStats(ctx context.Context, stats transferStats) error {
+	if m.code == "" {
+		return fmt.Errorf("mailbox code not set")
 	}
+	if stats.Mode == "" {
+		stats.Mode = m.role
+	}
+	return m.store.recordStats(ctx, m.code, stats)
 }
 
 func (m *redisMailbox) Cleanup(ctx context.Context) {
 	if m.code == "" {
 		return
 	}
-	keys := []string{
-		m.sessionKey(),
-		m.key("self", "send"),
-		m.key("self", "recv"),
-		m.channelKey("send"),
-		m.channelKey("recv"),
-		m.key("recv", "lock"),
-	}
-	_ = m.client.Del(ctx, keys...).Err()
-}
-
-func (m *redisMailbox) claimSender(ctx context.Context, code string) error {
-	session := m.sessionKeyFor(code)
-	ok, err := m.client.SetNX(ctx, session, "active", m.ttl).Result()
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return fmt.Errorf("code %s already in use", code)
-	}
-	return nil
-}
-
-func (m *redisMailbox) claimReceiver(ctx context.Context, code string) error {
-	session := m.sessionKeyFor(code)
-	deadline := time.Now().Add(m.ttl)
-	for {
-		exists, err := m.client.Exists(ctx, session).Result()
-		if err != nil {
-			return err
-		}
-		if exists > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("code %s not available", code)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(200 * time.Millisecond):
-		}
-	}
-	lockKey := m.keyFor(code, "recv", "lock")
-	ok, err := m.client.SetNX(ctx, lockKey, "1", m.ttl).Result()
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return fmt.Errorf("receiver already connected for %s", code)
-	}
-	return nil
-}
-
-func (m *redisMailbox) outboundKey() string {
-	if m.role == "send" {
-		return m.channelKey("send")
-	}
-	return m.channelKey("recv")
-}
-
-func (m *redisMailbox) inboundKey() string {
-	if m.role == "send" {
-		return m.channelKey("recv")
-	}
-	return m.channelKey("send")
-}
-
-func (m *redisMailbox) sessionKey() string {
-	return m.sessionKeyFor(m.code)
-}
-
-func (m *redisMailbox) sessionKeyFor(code string) string {
-	return m.keyFor(code, "session")
-}
-
-func (m *redisMailbox) channelKey(direction string) string {
-	return m.key(direction, "stream")
-}
-
-func (m *redisMailbox) key(suffix ...string) string {
-	return m.keyFor(m.code, suffix...)
-}
-
-func (m *redisMailbox) keyFor(code string, suffix ...string) string {
-	builder := strings.Builder{}
-	builder.WriteString(m.prefix)
-	builder.WriteString(":")
-	builder.WriteString(code)
-	for _, part := range suffix {
-		builder.WriteString(":")
-		builder.WriteString(part)
-	}
-	return builder.String()
+	_ = m.store.delete(ctx, m.code)
 }

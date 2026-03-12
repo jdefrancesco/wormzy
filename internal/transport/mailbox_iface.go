@@ -13,6 +13,7 @@ type mailbox interface {
 	WaitPeer(ctx context.Context) (*rendezvous.SelfInfo, error)
 	Send(ctx context.Context, typ string, body any) error
 	Receive(ctx context.Context) (mailboxMessage, error)
+	ReportStats(ctx context.Context, stats transferStats) error
 	Close() error
 }
 

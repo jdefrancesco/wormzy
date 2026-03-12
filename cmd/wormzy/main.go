@@ -39,6 +39,7 @@ func main() {
 		timeout     = flag.Duration("timeout", 60*time.Second, "overall rendezvous timeout")
 		loopback    = flag.Bool("dev-loopback", false, "use local addresses for testing")
 		showNetwork = flag.Bool("show-network", false, "display relay/STUN diagnostics in the UI")
+		downloadDir = flag.String("download-dir", "", "directory to store received files (defaults to current directory)")
 		logFile     = flag.String("log-file", "", "append detailed session logs to the given file")
 	)
 	flag.Parse()
@@ -70,6 +71,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *mode == "recv" {
+		dir := *downloadDir
+		if dir == "" {
+			dir = "."
+		}
+		absDir, err := filepath.Abs(dir)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "invalid download directory:", err)
+			os.Exit(1)
+		}
+		if err := ensureDownloadDir(absDir); err != nil {
+			fmt.Fprintln(os.Stderr, "download directory error:", err)
+			os.Exit(1)
+		}
+		*downloadDir = absDir
+	} else {
+		*downloadDir = ""
+	}
+
 	var (
 		logCloser    io.Closer
 		fileReporter transport.Reporter
@@ -77,7 +97,7 @@ func main() {
 
 	// Logging if needed
 	if *logFile != "" {
-		f, err := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		f, err := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "failed to open log file:", err)
 			os.Exit(1)
@@ -97,13 +117,14 @@ func main() {
 
 	// Transport config is the single source of truth for the session.
 	cfg := transport.Config{
-		Mode:      *mode,
-		FilePath:  *file,
-		Code:      *code,
-		RelayAddr: relayAddr,
-		RelayPin:  *relayPin,
-		Timeout:   *timeout,
-		Loopback:  *loopback,
+		Mode:        *mode,
+		FilePath:    *file,
+		Code:        *code,
+		RelayAddr:   relayAddr,
+		RelayPin:    *relayPin,
+		Timeout:     *timeout,
+		Loopback:    *loopback,
+		DownloadDir: *downloadDir,
 	}
 
 	// If we don't have an interactive terminal, run without the Bubble Tea UI.
@@ -198,6 +219,9 @@ func runHeadless(ctx context.Context, cfg transport.Config, extra transport.Repo
 		if result.FileHash != "" {
 			fmt.Printf("BLAKE3-256: %s\n", result.FileHash)
 		}
+		if result.Transport != "" {
+			fmt.Printf("Path: %s (%s)\n", strings.ToUpper(result.Transport), result.Candidate)
+		}
 	}
 }
 
@@ -267,6 +291,21 @@ func resolveRelay(flagValue string) string {
 		return env
 	}
 	return transport.DefaultRelay()
+}
+
+func ensureDownloadDir(path string) error {
+	info, err := os.Stat(path)
+	switch {
+	case err == nil:
+		if !info.IsDir() {
+			return fmt.Errorf("%s is not a directory", path)
+		}
+		return nil
+	case os.IsNotExist(err):
+		return os.MkdirAll(path, 0o750)
+	default:
+		return err
+	}
 }
 
 // combineReporters fans out reporting to all non-nil reporters.

@@ -233,6 +233,9 @@ func renderSuccessPanel(res *transport.Result) string {
 	if res.FileHash != "" {
 		lines = append(lines, fmt.Sprintf("Hash   %s", highlightText.Render(res.FileHash)))
 	}
+	if res.Transport != "" {
+		lines = append(lines, fmt.Sprintf("Path   %s (%s)", highlightText.Render(strings.ToUpper(res.Transport)), highlightText.Render(orDash(res.Candidate))))
+	}
 	lines = append(lines, fmt.Sprintf("Code   %s", highlightText.Render(orDash(res.Code))))
 	lines = append(lines, "")
 	lines = append(lines, subtleStyle.Render("Press q to exit"))

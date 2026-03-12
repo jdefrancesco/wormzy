@@ -24,11 +24,19 @@ func TestNewStun_Defaults(t *testing.T) {
 }
 
 func TestProbeServer_BadAddress(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
 
-	// Malformed address (missing host/port) should return an error quickly
+	start := time.Now()
 	if _, err := probeServer(ctx, ":", 1*time.Millisecond, 0); err == nil {
 		t.Fatalf("expected error for malformed server address, got nil")
+	}
+	if time.Since(start) > 10*time.Millisecond && ctx.Err() != nil {
+		t.Fatalf("probeServer took too long for malformed address")
+	}
+
+	if _, err := probeServer(ctx, "300.0.0.1:19302", 5*time.Millisecond, 1); err == nil {
+		t.Fatalf("expected resolution error for bad host")
 	}
 }
 
@@ -37,6 +45,7 @@ func TestProbeServer_Success(t *testing.T) {
 	// Start a fake STUN UDP server
 	l, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
+		skipIfPermissionDenied(t, err)
 		t.Fatalf("listen failed: %v", err)
 	}
 	defer l.Close()
@@ -74,6 +83,7 @@ func TestDiscoverOnConn(t *testing.T) {
 	// fake STUN server
 	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
+		skipIfPermissionDenied(t, err)
 		t.Fatalf("listen failed: %v", err)
 	}
 	defer server.Close()
@@ -117,5 +127,14 @@ func TestDiscoverOnConn(t *testing.T) {
 	}
 	if got == nil || !got.IP.Equal(respIP) || got.Port != respPort {
 		t.Fatalf("unexpected mapped addr: got %v want %v:%d", got, respIP, respPort)
+	}
+}
+
+func skipIfPermissionDenied(t *testing.T, err error) {
+	t.Helper()
+	if opErr, ok := err.(*net.OpError); ok {
+		if opErr.Err.Error() == "operation not permitted" {
+			t.Skipf("skipping: %v", err)
+		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 type MailboxHTTPServer struct {
 	client *redis.Client
 	ttl    time.Duration
+	store  *sessionStore
 }
 
 func NewMailboxHTTPServer(redisURL string, ttl time.Duration) (*MailboxHTTPServer, error) {
@@ -24,6 +25,7 @@ func NewMailboxHTTPServer(redisURL string, ttl time.Duration) (*MailboxHTTPServe
 	return &MailboxHTTPServer{
 		client: client,
 		ttl:    ttl,
+		store:  newSessionStore(client, ttl, "wormzy"),
 	}, nil
 }
 
@@ -39,6 +41,8 @@ func (s *MailboxHTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleSend(w, r)
 	case "/v1/receive":
 		s.handleReceive(w, r)
+	case "/v1/stats":
+		s.handleStats(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -51,6 +55,7 @@ func (s *MailboxHTTPServer) newMailbox(role, code string) *redisMailbox {
 		prefix: "wormzy",
 		role:   role,
 		code:   code,
+		store:  s.store,
 	}
 }
 
@@ -156,6 +161,35 @@ func (s *MailboxHTTPServer) handleReceive(w http.ResponseWriter, r *http.Request
 		"type": msg.Type,
 		"body": body,
 	})
+}
+
+func (s *MailboxHTTPServer) handleStats(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Role      string `json:"role"`
+		Code      string `json:"code"`
+		Mode      string `json:"mode"`
+		Transport string `json:"transport"`
+		Candidate string `json:"candidate"`
+		Completed bool   `json:"completed"`
+		Error     string `json:"error,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeHTTPError(w, http.StatusBadRequest, err)
+		return
+	}
+	mb := s.newMailbox(req.Role, req.Code)
+	stats := transferStats{
+		Mode:      req.Mode,
+		Transport: req.Transport,
+		Candidate: req.Candidate,
+		Completed: req.Completed,
+		Error:     req.Error,
+	}
+	if err := mb.ReportStats(r.Context(), stats); err != nil {
+		writeHTTPError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeHTTPJSON(w, map[string]string{"status": "ok"})
 }
 
 func writeHTTPError(w http.ResponseWriter, status int, err error) {

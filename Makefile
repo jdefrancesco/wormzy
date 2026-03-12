@@ -8,16 +8,19 @@ GOGET=$(GOCMD) get
 PACKAGES := $(shell $(GOCMD) list ./... | grep -v "/mvp$$")
 GOSEC_DIRS := $(shell $(GOCMD) list -f '{{.Dir}}' ./... | grep -v "/mvp$$")
 
-BINARY_NAME=wormzy
+DEFAULT_BINARY=wormzy
+BINARIES := wormzy rendezvous stuncheck mailbox
 
 all: test build
 
 debug:
-	$(GOBUILD) -o $(BINARY_NAME) -gcflags "all=-N -l" -v ./cmd/wormzy
+	$(GOBUILD) -o $(DEFAULT_BINARY) -gcflags "all=-N -l" -v ./cmd/wormzy
 
 build:
-	gosec -exclude=G104,G307 $(GOSEC_DIRS)
-	$(GOBUILD) -o $(BINARY_NAME) -v ./cmd/${BINARY_NAME}
+# 	gosec -exclude=G104,G307 $(GOSEC_DIRS)
+	@for bin in $(BINARIES); do \
+		$(GOBUILD) -o $$bin -v ./cmd/$$bin ; \
+	done
 
 test:
 	$(GOTEST) -v $(PACKAGES)
@@ -32,7 +35,9 @@ test-stun:
 
 .PHONY: install
 install:
-	cp ./$(BINARY_NAME) /usr/local/bin/$(BINARY_NAME)
+	@for bin in $(BINARIES); do \
+		cp ./$$bin /usr/local/bin/$$bin ; \
+	done
 
 
 .PHONY: gosec
@@ -42,7 +47,7 @@ gosec:
 .PHONY: clean
 clean:
 	$(GOCLEAN)
-	rm -f $(BINARY_NAME)
+	rm -f $(BINARIES)
 
 
 .PHONY: sec-lint

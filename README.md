@@ -32,6 +32,10 @@ wormzy recv
 # prompted for the pairing code, then the file arrives
 ```
 
+By default the receiver saves into the current working directory. Override this with
+`wormzy recv -download-dir ~/Downloads`—Wormzy will create the directory if needed and
+will refuse the transfer up front if the filesystem cannot hold the advertised file size.
+
 ## Screenshots
 
 Add screenshots (or a short screencast thumbnail) under `docs/screenshots/` and link them here.

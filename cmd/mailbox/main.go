@@ -8,7 +8,7 @@ import (
 
 	"github.com/jdefrancesco/internal/transport"
 )
-wesome 
+
 func main() {
 	var (
 		listen   = flag.String("listen", ":8080", "http listen address")
@@ -22,7 +22,14 @@ func main() {
 		log.Fatalf("failed to init server: %v", err)
 	}
 	log.Printf("wormzy relay proxy listening on %s (redis %s)", *listen, *redisURL)
-	if err := http.ListenAndServe(*listen, server); err != nil {
+	srv := &http.Server{
+		Addr:         *listen,
+		Handler:      server,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }

@@ -19,6 +19,7 @@ Wormzy is a peer-to-peer file sender built around three subsystems: the CLI/UI (
 ## Configuration Points
 
 - `-relay` (or `WORMZY_RELAY[_URL]`) selects Redis vs. HTTP relay.
+- `-download-dir` chooses where the receiver stores files; Wormzy creates the folder if needed and refuses the transfer if the filesystem lacks enough free space.
 - `-timeout`, `-show-network`, `-log-file`, and `-dev-loopback` customize behavior.
 - `cmd/mailbox` runs as `wormzy-mailbox` on your infrastructure; point it at your managed Redis string.
 
