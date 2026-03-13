@@ -1,0 +1,17 @@
+[Unit]
+Description=Wormzy mailbox proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wormzy
+Group=wormzy
+EnvironmentFile=/etc/wormzy/mailbox.env
+ExecStart=/usr/local/bin/mailbox -listen ${WORMZY_MAILBOX_LISTEN:-:9000} -redis "${WORMZY_MAILBOX_REDIS}"
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -321,10 +321,6 @@ func renderProgress(p float64) string {
 	return boxStyle.Render(fmt.Sprintf("Progress\n%s %3.0f%%", accentStyle.Render(bar), p*100))
 }
 
-func renderHeader() string {
-	return headerStyle.Render("wormzy • bubbletea console")
-}
-
 func stepIcon(state transport.StageState) string {
 	switch state {
 	case transport.StageStateDone:
@@ -349,6 +345,10 @@ func formatSize(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+func renderHeader() string {
+	return headerStyle.Render("WORMZY • user console")
 }
 
 func orDash(s string) string {

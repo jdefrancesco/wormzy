@@ -217,8 +217,8 @@ func hasTTY() bool {
 
 // runHeadless runs the transport with console output when no TTY is available.
 func runHeadless(ctx context.Context, cfg transport.Config, extra transport.Reporter) {
-	fmt.Println("wormzy: TTY not detected, running without Bubble Tea UI")
-	consoleReporter := transport.ReporterFunc(func(format string, args ...interface{}) {
+	fmt.Println("wormzy: TTY not detected, running TUI")
+	consoleReporter := transport.ReporterFunc(func(format string, args ...any) {
 		fmt.Printf("[wormzy] "+format+"\n", args...)
 	})
 	reporter := combineReporters(consoleReporter, extra)
@@ -348,7 +348,7 @@ type reporterMux struct {
 	reporters []transport.Reporter
 }
 
-func (m reporterMux) Logf(format string, args ...interface{}) {
+func (m reporterMux) Logf(format string, args ...any) {
 	for _, r := range m.reporters {
 		if r != nil {
 			r.Logf(format, args...)
@@ -377,7 +377,7 @@ type fileReporter struct {
 	out io.Writer
 }
 
-func (f *fileReporter) Logf(format string, args ...interface{}) {
+func (f *fileReporter) Logf(format string, args ...any) {
 	if f == nil || f.out == nil {
 		return
 	}
