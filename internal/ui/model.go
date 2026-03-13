@@ -190,7 +190,7 @@ func renderSession(s Session) string {
 		rows = append(rows, fmt.Sprintf("Relay  %s", highlightText.Render(orDash(s.Relay))))
 	}
 	if s.Code != "" {
-		rows = append(rows, fmt.Sprintf("Code   %s", highlightText.Render(s.Code)))
+		rows = append(rows, fmt.Sprintf("Code   %s", codeStyle.Render(s.Code)))
 	}
 	return boxStyle.Render(strings.Join(rows, "\n"))
 }
@@ -244,7 +244,7 @@ func renderSuccessPanel(res *transport.Result) string {
 	if res.Transport != "" {
 		lines = append(lines, fmt.Sprintf("Path   %s (%s)", highlightText.Render(strings.ToUpper(res.Transport)), highlightText.Render(orDash(res.Candidate))))
 	}
-	lines = append(lines, fmt.Sprintf("Code   %s", highlightText.Render(orDash(res.Code))))
+	lines = append(lines, fmt.Sprintf("Code   %s", codeStyle.Render(orDash(res.Code))))
 	lines = append(lines, "")
 	lines = append(lines, subtleStyle.Render("Press q to exit"))
 	return successBoxStyle.Render(strings.Join(lines, "\n"))
@@ -266,6 +266,7 @@ func renderReceivePanel(s Session) string {
 		" • " + bubblegumAccentStyle.Render("Waiting for the manifest from your peer."),
 		" • " + bubblegumAccentStyle.Render("Encrypted channel locks in once the sender connects."),
 		" • " + bubblegumAccentStyle.Render("Transfer auto-verifies hashes before finishing."),
+		" • " + bubblegumAccentStyle.Render("Sessions idle out after a few minutes to keep things tidy."),
 	}
 	return bubblegumBoxStyle.Render(strings.Join(lines, "\n"))
 }
@@ -371,6 +372,7 @@ var (
 	successTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#5DFF8D"))
 	errorStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5F87"))
 	issueTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5F87"))
+	codeStyle         = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFD75F"))
 	bubblegumBoxStyle = lipgloss.NewStyle().
 				Border(lipgloss.DoubleBorder()).
 				Padding(0, 1).

@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
 
@@ -43,7 +45,8 @@ func main() {
 		code        = flag.String("code", "", "wormzy pairing code")
 		relay       = flag.String("relay", "", "redis address/URL for rendezvous (defaults to WORMZY_RELAY_URL or 127.0.0.1:6379)")
 		relayPin    = flag.String("relay-pin", "", "base64(SHA256(SPKI)) pin for rendezvous TLS")
-		timeout     = flag.Duration("timeout", 60*time.Second, "overall rendezvous timeout")
+		timeout     = flag.Duration("timeout", 90*time.Second, "handshake timeout before we give up on pairing")
+		idleTO      = flag.Duration("idle-timeout", 5*time.Minute, "max idle time after pairing before aborting a stalled transfer")
 		loopback    = flag.Bool("dev-loopback", false, "use local addresses for testing")
 		showNetwork = flag.Bool("show-network", false, "display relay/STUN diagnostics in the UI")
 		downloadDir = flag.String("download-dir", "", "directory to store received files (defaults to current directory)")
@@ -131,14 +134,15 @@ func main() {
 
 	// Transport config is the single source of truth for the session.
 	cfg := transport.Config{
-		Mode:        mode,
-		FilePath:    *file,
-		Code:        *code,
-		RelayAddr:   relayAddr,
-		RelayPin:    *relayPin,
-		Timeout:     *timeout,
-		Loopback:    *loopback,
-		DownloadDir: *downloadDir,
+		Mode:             mode,
+		FilePath:         *file,
+		Code:             *code,
+		RelayAddr:        relayAddr,
+		RelayPin:         *relayPin,
+		HandshakeTimeout: *timeout,
+		IdleTimeout:      *idleTO,
+		Loopback:         *loopback,
+		DownloadDir:      *downloadDir,
 	}
 
 	// If we don't have an interactive terminal, run without the Bubble Tea UI.
@@ -293,7 +297,8 @@ func applyCommandArgs(mode, file, code *string) error {
 // promptForCode reads a pairing code from stdin.
 func promptForCode() (string, error) {
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Enter wormzy pairing code: ")
+	prompt := lipgloss.NewStyle().Foreground(lipgloss.Color("#777777")).Render("Pairing code → ")
+	fmt.Print(prompt)
 	code, err := reader.ReadString('\n')
 	if err != nil && err != io.EOF {
 		return "", err

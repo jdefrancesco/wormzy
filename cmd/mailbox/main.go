@@ -13,7 +13,7 @@ func main() {
 	var (
 		listen   = flag.String("listen", ":8080", "http listen address")
 		redisURL = flag.String("redis", "127.0.0.1:6379", "redis connection url")
-		ttl      = flag.Duration("ttl", time.Minute, "session ttl")
+		ttl      = flag.Duration("ttl", 10*time.Minute, "session ttl")
 	)
 	flag.Parse()
 

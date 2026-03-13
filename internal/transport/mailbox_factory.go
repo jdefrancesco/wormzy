@@ -8,10 +8,11 @@ import (
 )
 
 func newMailbox(ctx context.Context, cfg Config) (mailbox, error) {
+	ttl := cfg.sessionTTL()
 	if strings.HasPrefix(cfg.RelayAddr, "http://") || strings.HasPrefix(cfg.RelayAddr, "https://") {
-		return newHTTPMailbox(cfg.RelayAddr, cfg.Mode, cfg.Timeout), nil
+		return newHTTPMailbox(cfg.RelayAddr, cfg.Mode, cfg.HandshakeTimeout), nil
 	}
-	return newRedisMailbox(ctx, cfg.RelayAddr, cfg.Timeout, cfg.Mode)
+	return newRedisMailbox(ctx, cfg.RelayAddr, ttl, cfg.Mode)
 }
 
 func newHTTPClient(timeout time.Duration) *http.Client {

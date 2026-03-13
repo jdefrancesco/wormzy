@@ -36,9 +36,10 @@ import (
 )
 
 const (
-	alpn          = "p2p-wormzy-1"
-	defaultRelay  = "127.0.0.1:6379"
-	defaultDialTO = 60 * time.Second
+	alpn                  = "p2p-wormzy-1"
+	defaultRelay          = "127.0.0.1:6379"
+	defaultHandshakeTO    = 90 * time.Second
+	defaultTransferIdleTO = 5 * time.Minute
 
 	// Wire-format sizing limits.
 	maxUint16PayloadLen = (1 << 16) - 1
@@ -51,15 +52,16 @@ const (
 
 // Config controls how a Wormzy transfer session behaves.
 type Config struct {
-	Mode        string
-	FilePath    string
-	Code        string
-	RelayAddr   string
-	RelayPin    string
-	STUNServers []string
-	Timeout     time.Duration
-	Loopback    bool
-	DownloadDir string
+	Mode             string
+	FilePath         string
+	Code             string
+	RelayAddr        string
+	RelayPin         string
+	STUNServers      []string
+	HandshakeTimeout time.Duration
+	IdleTimeout      time.Duration
+	Loopback         bool
+	DownloadDir      string
 }
 
 // Result reports information about the established session.
@@ -130,7 +132,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 	reporter.Logf("udp/listen %s", udpConn.LocalAddr())
 
 	self := rendezvous.SelfInfo{Local: localEndpoint(udpConn)}
-	ctxStun, cancelStun := context.WithTimeout(ctx, cfg.Timeout)
+	ctxStun, cancelStun := context.WithTimeout(ctx, cfg.HandshakeTimeout)
 	reporter.Stage(StageSTUN, StageStateRunning, "probing reflexive address")
 	pub, err := stun.DiscoverOnConn(ctxStun, udpConn, cfg.stunServers(), 2*time.Second, 2)
 	cancelStun()
@@ -196,7 +198,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		return nil, err
 	}
 
-	punchCtx, cancelPunch := context.WithTimeout(ctx, cfg.Timeout)
+	punchCtx, cancelPunch := context.WithTimeout(ctx, cfg.HandshakeTimeout)
 	defer cancelPunch()
 	stopPunch := make(chan struct{})
 	var punchWG sync.WaitGroup
@@ -213,7 +215,11 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 	}
 	serverTLS.NextProtos = []string{alpn}
 	clientTLS := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{alpn}}
-	quicConf := &quic.Config{KeepAlivePeriod: 15 * time.Second}
+	quicConf := &quic.Config{
+		KeepAlivePeriod:     15 * time.Second,
+		MaxIdleTimeout:      cfg.IdleTimeout,
+		HandshakeIdleTimeout: cfg.HandshakeTimeout,
+	}
 
 	var quicConn *quic.Conn
 
@@ -226,7 +232,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		}
 		defer ln.Close()
 		reporter.Logf("waiting for peer to dial QUIC")
-		ctxAccept, cancelAccept := context.WithTimeout(ctx, cfg.Timeout)
+		ctxAccept, cancelAccept := context.WithTimeout(ctx, cfg.HandshakeTimeout)
 		defer cancelAccept()
 		conn, err := ln.Accept(ctxAccept)
 		if err != nil {
@@ -238,7 +244,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		reporter.Stage(StageQUIC, StageStateDone, conn.RemoteAddr().String())
 	case "recv":
 		reporter.Stage(StageQUIC, StageStateRunning, "dialing peer")
-		ctxDial, cancelDial := context.WithTimeout(ctx, cfg.Timeout)
+		ctxDial, cancelDial := context.WithTimeout(ctx, cfg.HandshakeTimeout)
 		defer cancelDial()
 		conn, err := quicTransport.Dial(ctxDial, peerUDP, clientTLS, quicConf)
 		if err != nil {
@@ -300,10 +306,24 @@ func (cfg Config) withDefaults() Config {
 	if cfg.RelayAddr == "" {
 		cfg.RelayAddr = defaultRelay
 	}
-	if cfg.Timeout == 0 {
-		cfg.Timeout = defaultDialTO
+	if cfg.HandshakeTimeout <= 0 {
+		cfg.HandshakeTimeout = defaultHandshakeTO
+	}
+	if cfg.IdleTimeout <= 0 {
+		cfg.IdleTimeout = defaultTransferIdleTO
 	}
 	return cfg
+}
+
+func (cfg Config) sessionTTL() time.Duration {
+	ttl := cfg.HandshakeTimeout
+	if cfg.IdleTimeout > ttl {
+		ttl = cfg.IdleTimeout
+	}
+	if ttl <= 0 {
+		ttl = defaultTransferIdleTO
+	}
+	return ttl + time.Minute
 }
 
 func (cfg Config) validate() error {
