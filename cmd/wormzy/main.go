@@ -34,7 +34,6 @@ func boldCodeStyle() lipgloss.Style {
 
 func main() {
 	// Define command-line flags.
-	// TODOL Use a more modern parsing package with subcommands and SysV flags.
 	rawCmd, preFile, preCode, stripped := normalizeArgs(os.Args[1:])
 	os.Args = append([]string{os.Args[0]}, stripped...)
 	var (
@@ -52,8 +51,12 @@ func main() {
 	)
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
-		title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5FD2")).Render("Usage")
-		fmt.Fprintf(out, "%s\n  wormzy send <file> [flags]\n  wormzy recv [code] [flags]\n\nFlags:\n", title)
+		headingStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFD75F"))
+		heading := headingStyle.Render("Usage\n")
+		sendLine := lipgloss.NewStyle().Foreground(lipgloss.Color("#23a84b")).Render("  wormzy send <file> [flags]")
+		recvLine := lipgloss.NewStyle().Foreground(lipgloss.Color("#23a84b")).Render("  wormzy recv [code] [flags]")
+		flagHeading := headingStyle.Render("Flags\n")
+		fmt.Fprintf(out, "%s\n%s\n%s\n\n%s\n", heading, sendLine, recvLine, flagHeading)
 		flag.PrintDefaults()
 	}
 	flag.Parse()

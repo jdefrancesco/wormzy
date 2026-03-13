@@ -207,6 +207,9 @@ func renderSteps(steps []step) string {
 }
 
 func renderLogs(logs []string) string {
+	if len(logs) == 0 {
+		return ""
+	}
 	return boxStyle.Render("Logs\n" + subtleStyle.Render(strings.Join(logs, "\n")))
 }
 
