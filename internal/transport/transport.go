@@ -216,8 +216,8 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 	serverTLS.NextProtos = []string{alpn}
 	clientTLS := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{alpn}}
 	quicConf := &quic.Config{
-		KeepAlivePeriod:     15 * time.Second,
-		MaxIdleTimeout:      cfg.IdleTimeout,
+		KeepAlivePeriod:      15 * time.Second,
+		MaxIdleTimeout:       cfg.IdleTimeout,
 		HandshakeIdleTimeout: cfg.HandshakeTimeout,
 	}
 

@@ -18,27 +18,25 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
-
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-isatty"
 
 	"github.com/jdefrancesco/internal/transport"
 	"github.com/jdefrancesco/internal/ui"
 )
 
-const (
-	version          = "0.1.2-dev"
-	commandUsageHelp = `Usage:
-  wormzy send <file> [flags]
-  wormzy recv [code] [flags]
+const version = "0.1.2-dev"
 
-Flags:`
-)
+func boldCodeStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFD75F"))
+}
 
 func main() {
 	// Define command-line flags.
 	// TODOL Use a more modern parsing package with subcommands and SysV flags.
+	rawCmd, preFile, preCode, stripped := normalizeArgs(os.Args[1:])
+	os.Args = append([]string{os.Args[0]}, stripped...)
 	var (
 		modeFlag    = flag.String("mode", "", "send or recv (deprecated; use wormzy send/recv)")
 		file        = flag.String("file", "", "file to send (send mode only)")
@@ -53,22 +51,34 @@ func main() {
 		logFile     = flag.String("log-file", "", "append detailed session logs to the given file")
 	)
 	flag.Usage = func() {
-		fmt.Fprintln(flag.CommandLine.Output(), commandUsageHelp)
+		out := flag.CommandLine.Output()
+		title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5FD2")).Render("Usage")
+		fmt.Fprintf(out, "%s\n  wormzy send <file> [flags]\n  wormzy recv [code] [flags]\n\nFlags:\n", title)
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 	mode := strings.TrimSpace(*modeFlag)
+	if rawCmd != "" {
+		if mode != "" && mode != rawCmd {
+			fmt.Fprintf(os.Stderr, "error: conflicting mode: %s (flag) vs %s command\n", mode, rawCmd)
+			os.Exit(1)
+		}
+		mode = rawCmd
+	}
+	if *file == "" {
+		*file = preFile
+	}
+	if *code == "" {
+		*code = preCode
+	}
+	if extras := flag.Args(); len(extras) > 0 {
+		fmt.Fprintf(os.Stderr, "error: unexpected arguments: %s\n", strings.Join(extras, " "))
+		os.Exit(1)
+	}
 
 	// Avoid starting interactive UI/transfer work during `go test`.
 	if runningUnderGoTest() {
 		return
-	}
-
-	// Support `wormzy send <file>` / `wormzy recv [code]` in addition to flags.
-	if err := applyCommandArgs(&mode, file, code); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		flag.Usage()
-		os.Exit(1)
 	}
 
 	// If the pairing code isn't provided, prompt interactively in recv mode.
@@ -232,7 +242,9 @@ func runHeadless(ctx context.Context, cfg transport.Config, extra transport.Repo
 		os.Exit(1)
 	}
 	if result != nil {
-		fmt.Printf("Pairing code: %s\n", result.Code)
+		if result.Code != "" {
+			fmt.Printf("Pairing code: %s\n", boldCodeStyle().Render(result.Code))
+		}
 		if result.FilePath != "" {
 			fmt.Printf("File: %s\n", result.FilePath)
 		}
@@ -248,50 +260,26 @@ func runHeadless(ctx context.Context, cfg transport.Config, extra transport.Repo
 	}
 }
 
-// applyCommandArgs maps positional subcommands into the flag-backed variables.
-func applyCommandArgs(mode, file, code *string) error {
-	args := flag.Args()
+func normalizeArgs(args []string) (command, fileArg, codeArg string, remaining []string) {
 	if len(args) == 0 {
-		if *mode == "" {
-			return fmt.Errorf("missing command; run `wormzy send <file>` or `wormzy recv`")
-		}
-		return nil
+		return "", "", "", args
 	}
-	cmd := args[0]
-	switch cmd {
-	case "send":
-		if *mode != "" && *mode != "send" {
-			return fmt.Errorf("conflicting mode: %s (flag) vs send command", *mode)
-		}
-		*mode = "send"
-		rest := args[1:]
-		if *file == "" {
-			if len(rest) == 0 {
-				return fmt.Errorf("send requires a file argument (wormzy send <file>)")
-			}
-			*file = rest[0]
-			rest = rest[1:]
-		}
-		if len(rest) > 0 {
-			return fmt.Errorf("unexpected arguments for send: %s", strings.Join(rest, " "))
-		}
-	case "recv":
-		if *mode != "" && *mode != "recv" {
-			return fmt.Errorf("conflicting mode: %s (flag) vs recv command", *mode)
-		}
-		*mode = "recv"
-		rest := args[1:]
-		if *code == "" && len(rest) > 0 {
-			*code = rest[0]
-			rest = rest[1:]
-		}
-		if len(rest) > 0 {
-			return fmt.Errorf("unexpected arguments for recv: %s", strings.Join(rest, " "))
-		}
-	default:
-		return fmt.Errorf("unknown command %q", cmd)
+	first := args[0]
+	if first != "send" && first != "recv" {
+		return "", "", "", args
 	}
-	return nil
+	command = first
+	copyArgs := append([]string(nil), args[1:]...)
+	if len(copyArgs) > 0 && !strings.HasPrefix(copyArgs[0], "-") {
+		switch command {
+		case "send":
+			fileArg = copyArgs[0]
+		case "recv":
+			codeArg = copyArgs[0]
+		}
+		copyArgs = copyArgs[1:]
+	}
+	return command, fileArg, codeArg, copyArgs
 }
 
 // promptForCode reads a pairing code from stdin.
