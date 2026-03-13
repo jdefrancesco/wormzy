@@ -95,8 +95,8 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 			return nil, err
 		}
 		cursor = nextCursor
-		if len(keys) > 0 {
-			values, err := mc.client.MGet(ctx, stringSliceToAny(keys)...).Result()
+			if len(keys) > 0 {
+				values, err := mc.client.MGet(ctx, keys...).Result()
 			if err != nil {
 				return nil, err
 			}
@@ -230,12 +230,4 @@ func bytesFromInterface(v interface{}) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unsupported redis type %T", v)
 	}
-}
-
-func stringSliceToAny(values []string) []interface{} {
-	out := make([]interface{}, len(values))
-	for i, v := range values {
-		out[i] = v
-	}
-	return out
 }
