@@ -9,7 +9,7 @@ PACKAGES := $(shell $(GOCMD) list ./... | grep -v "/mvp$$")
 GOSEC_DIRS := $(shell $(GOCMD) list -f '{{.Dir}}' ./... | grep -v "/mvp$$")
 
 DEFAULT_BINARY=wormzy
-BINARIES := wormzy rendezvous stuncheck mailbox
+BINARIES := wormzy rendezvous stuncheck mailbox dashboard
 
 all: test build
 

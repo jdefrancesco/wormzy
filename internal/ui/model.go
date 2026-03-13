@@ -19,6 +19,7 @@ type Session struct {
 	File        string
 	Relay       string
 	Code        string
+	DownloadDir string
 	ShowNetwork bool
 }
 
@@ -133,6 +134,10 @@ func (m Model) View() string {
 	b.WriteString("\n")
 	b.WriteString(renderSession(m.session))
 	b.WriteString("\n")
+	if strings.EqualFold(m.session.Mode, "RECV") && !m.done {
+		b.WriteString(renderReceivePanel(m.session))
+		b.WriteString("\n")
+	}
 	b.WriteString(renderSteps(m.steps))
 	b.WriteString("\n")
 	b.WriteString(renderProgress(m.progress))
@@ -177,6 +182,9 @@ func renderSession(s Session) string {
 	rows := []string{
 		fmt.Sprintf("Mode   %s", highlightText.Render(s.Mode)),
 		fmt.Sprintf("File   %s", highlightText.Render(orDash(s.File))),
+	}
+	if strings.EqualFold(s.Mode, "RECV") && s.DownloadDir != "" {
+		rows = append(rows, fmt.Sprintf("Dest   %s", highlightText.Render(s.DownloadDir)))
 	}
 	if s.ShowNetwork {
 		rows = append(rows, fmt.Sprintf("Relay  %s", highlightText.Render(orDash(s.Relay))))
@@ -240,6 +248,26 @@ func renderSuccessPanel(res *transport.Result) string {
 	lines = append(lines, "")
 	lines = append(lines, subtleStyle.Render("Press q to exit"))
 	return successBoxStyle.Render(strings.Join(lines, "\n"))
+}
+
+func renderReceivePanel(s Session) string {
+	if !strings.EqualFold(s.Mode, "RECV") {
+		return ""
+	}
+	dest := s.DownloadDir
+	if dest == "" {
+		dest = "."
+	}
+	lines := []string{
+		bubblegumTitleStyle.Render("Ready to receive"),
+		fmt.Sprintf("Saving to %s", bubblegumAccentStyle.Render(dest)),
+		"",
+		bubblegumSubtleStyle.Render("Next up"),
+		" • " + bubblegumAccentStyle.Render("Waiting for the manifest from your peer."),
+		" • " + bubblegumAccentStyle.Render("Encrypted channel locks in once the sender connects."),
+		" • " + bubblegumAccentStyle.Render("Transfer auto-verifies hashes before finishing."),
+	}
+	return bubblegumBoxStyle.Render(strings.Join(lines, "\n"))
 }
 
 func suggestionsForError(err error) []string {
@@ -343,4 +371,12 @@ var (
 	successTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#5DFF8D"))
 	errorStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5F87"))
 	issueTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5F87"))
+	bubblegumBoxStyle = lipgloss.NewStyle().
+				Border(lipgloss.DoubleBorder()).
+				Padding(0, 1).
+				BorderForeground(lipgloss.Color("#FF9EC4")).
+				Background(lipgloss.Color("#2B1223"))
+	bubblegumTitleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFB3C6"))
+	bubblegumAccentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD1DC"))
+	bubblegumSubtleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#E0A4C2"))
 )

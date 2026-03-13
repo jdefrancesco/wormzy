@@ -25,13 +25,20 @@ import (
 	"github.com/jdefrancesco/internal/ui"
 )
 
-const version = "0.1.2-dev"
+const (
+	version          = "0.1.2-dev"
+	commandUsageHelp = `Usage:
+  wormzy send <file> [flags]
+  wormzy recv [code] [flags]
+
+Flags:`
+)
 
 func main() {
 	// Define command-line flags.
 	// TODOL Use a more modern parsing package with subcommands and SysV flags.
 	var (
-		mode        = flag.String("mode", "", "send or recv")
+		modeFlag    = flag.String("mode", "", "send or recv (deprecated; use wormzy send/recv)")
 		file        = flag.String("file", "", "file to send (send mode only)")
 		code        = flag.String("code", "", "wormzy pairing code")
 		relay       = flag.String("relay", "", "redis address/URL for rendezvous (defaults to WORMZY_RELAY_URL or 127.0.0.1:6379)")
@@ -42,7 +49,12 @@ func main() {
 		downloadDir = flag.String("download-dir", "", "directory to store received files (defaults to current directory)")
 		logFile     = flag.String("log-file", "", "append detailed session logs to the given file")
 	)
+	flag.Usage = func() {
+		fmt.Fprintln(flag.CommandLine.Output(), commandUsageHelp)
+		flag.PrintDefaults()
+	}
 	flag.Parse()
+	mode := strings.TrimSpace(*modeFlag)
 
 	// Avoid starting interactive UI/transfer work during `go test`.
 	if runningUnderGoTest() {
@@ -50,13 +62,14 @@ func main() {
 	}
 
 	// Support `wormzy send <file>` / `wormzy recv [code]` in addition to flags.
-	if err := applyCommandArgs(mode, file, code); err != nil {
+	if err := applyCommandArgs(&mode, file, code); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		flag.Usage()
 		os.Exit(1)
 	}
 
 	// If the pairing code isn't provided, prompt interactively in recv mode.
-	if *mode == "recv" && *code == "" {
+	if mode == "recv" && *code == "" {
 		entered, err := promptForCode()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error reading code:", err)
@@ -66,12 +79,13 @@ func main() {
 	}
 
 	// Validate after argument normalization and optional prompting.
-	if err := validateArgs(*mode, *file); err != nil {
+	if err := validateArgs(mode, *file); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		flag.Usage()
 		os.Exit(1)
 	}
 
-	if *mode == "recv" {
+	if mode == "recv" {
 		dir := *downloadDir
 		if dir == "" {
 			dir = "."
@@ -117,7 +131,7 @@ func main() {
 
 	// Transport config is the single source of truth for the session.
 	cfg := transport.Config{
-		Mode:        *mode,
+		Mode:        mode,
 		FilePath:    *file,
 		Code:        *code,
 		RelayAddr:   relayAddr,
@@ -135,10 +149,12 @@ func main() {
 
 	// Start the TUI and run the transfer concurrently.
 	session := ui.Session{
-		Mode:        strings.ToUpper(*mode),
-		File:        displayFile(*mode, *file),
+		Mode:        strings.ToUpper(mode),
+		File:        displayFile(mode, *file),
 		Relay:       relayAddr,
+		Code:        *code,
 		ShowNetwork: *showNetwork,
+		DownloadDir: *downloadDir,
 	}
 	model := ui.NewModel(session)
 	prog := tea.NewProgram(model, tea.WithAltScreen())
@@ -170,7 +186,10 @@ func main() {
 // validateArgs checks required arguments for the chosen mode.
 func validateArgs(mode, file string) error {
 	if mode != "send" && mode != "recv" {
-		return fmt.Errorf("mode must be send or recv")
+		if mode == "" {
+			return fmt.Errorf("missing command; run `wormzy send <file>` or `wormzy recv`")
+		}
+		return fmt.Errorf("unknown mode %q; use send or recv", mode)
 	}
 	if mode == "send" && file == "" {
 		return fmt.Errorf("send requires a file (wormzy send <file>)")
@@ -229,6 +248,9 @@ func runHeadless(ctx context.Context, cfg transport.Config, extra transport.Repo
 func applyCommandArgs(mode, file, code *string) error {
 	args := flag.Args()
 	if len(args) == 0 {
+		if *mode == "" {
+			return fmt.Errorf("missing command; run `wormzy send <file>` or `wormzy recv`")
+		}
 		return nil
 	}
 	cmd := args[0]
