@@ -4,7 +4,6 @@ test.bin
 .vscode/
 gocache/
 node_modules/
-hack/
 dist/
 .env
 stun.test
