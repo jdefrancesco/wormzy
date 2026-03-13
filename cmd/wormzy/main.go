@@ -32,7 +32,39 @@ func boldCodeStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFD75F"))
 }
 
+var (
+	titleStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#90cc8918"))
+	subtitleStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#727f79"))
+
+	boxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#afcfaa43")).
+			Padding(1, 3)
+)
+
+func ShowHeader() string {
+
+	logo := `
+██╗    ██╗ ██████╗ ██████╗ ███╗   ███╗███████╗██╗   ██╗
+██║    ██║██╔═══██╗██╔══██╗████╗ ████║╚══███╔╝╚██╗ ██╔╝
+██║ █╗ ██║██║   ██║██████╔╝██╔████╔██║  ███╔╝  ╚████╔╝
+██║███╗██║██║   ██║██╔══██╗██║╚██╔╝██║ ███╔╝    ╚██╔╝
+╚███╔███╔╝╚██████╔╝██║  ██║██║ ╚═╝ ██║███████╗   ██║
+ ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝   ╚═╝
+`
+
+	title := titleStyle.Render(logo)
+	subtitle := subtitleStyle.Render("secure peer-to-peer file transfer • noise + quic")
+
+	return boxStyle.Render(title + "\n" + subtitle)
+}
+
 func main() {
+	fmt.Println(ShowHeader())
+	fmt.Println()
 	// Define command-line flags.
 	rawCmd, preFile, preCode, stripped := normalizeArgs(os.Args[1:])
 	os.Args = append([]string{os.Args[0]}, stripped...)
