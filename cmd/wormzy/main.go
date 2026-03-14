@@ -63,16 +63,19 @@ func ShowHeader() string {
 }
 
 func main() {
+
+	// Display the header and usage information.
 	fmt.Println(ShowHeader())
 	fmt.Println()
+
 	// Define command-line flags.
 	rawCmd, preFile, preCode, stripped := normalizeArgs(os.Args[1:])
 	os.Args = append([]string{os.Args[0]}, stripped...)
 	var (
-		modeFlag    = flag.String("mode", "", "send or recv (deprecated; use wormzy send/recv)")
-		file        = flag.String("file", "", "file to send (send mode only)")
-		code        = flag.String("code", "", "wormzy pairing code")
-		relay       = flag.String("relay", "", "redis address/URL for rendezvous (defaults to WORMZY_RELAY_URL or 127.0.0.1:6379)")
+		modeFlag = flag.String("mode", "", "send or recv (deprecated; use wormzy send/recv)")
+		file     = flag.String("file", "", "file to send (send mode only)")
+		code     = flag.String("code", "", "wormzy pairing code")
+		// relay       = flag.String("relay", "", "redis address/URL for rendezvous (defaults to WORMZY_RELAY_URL or 127.0.0.1:6379)")
 		relayPin    = flag.String("relay-pin", "", "base64(SHA256(SPKI)) pin for rendezvous TLS")
 		timeout     = flag.Duration("timeout", 90*time.Second, "handshake timeout before we give up on pairing")
 		idleTO      = flag.Duration("idle-timeout", 5*time.Minute, "max idle time after pairing before aborting a stalled transfer")
