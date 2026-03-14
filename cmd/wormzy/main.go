@@ -7,9 +7,12 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -62,177 +65,369 @@ func ShowHeader() string {
 	return boxStyle.Render(title + "\n" + subtitle)
 }
 
-func main() {
+type options struct {
+	Mode        string
+	File        string
+	Code        string
+	DownloadDir string
+	Relay       string
+	RelayPin    string
+	Timeout     time.Duration
+	IdleTimeout time.Duration
+	DevLoopback bool
+	ShowNetwork bool
+	LogFile     string
+}
 
-	// Display the header and usage information.
+var (
+	errShowHelp       = errors.New("usage shown")
+	usageHeadingStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFD75F"))
+	usageCommandStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#5DFF8D"))
+	usageFlagStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD75F"))
+	usageDescStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#CACACA"))
+)
+
+func main() {
 	fmt.Println(ShowHeader())
 	fmt.Println()
 
-	// Define command-line flags.
-	rawCmd, preFile, preCode, stripped := normalizeArgs(os.Args[1:])
-	os.Args = append([]string{os.Args[0]}, stripped...)
-	var (
-		modeFlag = flag.String("mode", "", "send or recv (deprecated; use wormzy send/recv)")
-		file     = flag.String("file", "", "file to send (send mode only)")
-		code     = flag.String("code", "", "wormzy pairing code")
-		// relay       = flag.String("relay", "", "redis address/URL for rendezvous (defaults to WORMZY_RELAY_URL or 127.0.0.1:6379)")
-		relayPin    = flag.String("relay-pin", "", "base64(SHA256(SPKI)) pin for rendezvous TLS")
-		timeout     = flag.Duration("timeout", 90*time.Second, "handshake timeout before we give up on pairing")
-		idleTO      = flag.Duration("idle-timeout", 5*time.Minute, "max idle time after pairing before aborting a stalled transfer")
-		loopback    = flag.Bool("dev-loopback", false, "use local addresses for testing")
-		showNetwork = flag.Bool("show-network", false, "display relay/STUN diagnostics in the UI")
-		downloadDir = flag.String("download-dir", "", "directory to store received files (defaults to current directory)")
-		logFile     = flag.String("log-file", "", "append detailed session logs to the given file")
-	)
-	flag.Usage = func() {
-		out := flag.CommandLine.Output()
-		headingStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFD75F"))
-		heading := headingStyle.Render("Usage\n")
-		sendLine := lipgloss.NewStyle().Foreground(lipgloss.Color("#23a84b")).Render("  wormzy send <file> [flags]")
-		recvLine := lipgloss.NewStyle().Foreground(lipgloss.Color("#23a84b")).Render("  wormzy recv [code] [flags]")
-		flagHeading := headingStyle.Render("Flags\n")
-		fmt.Fprintf(out, "%s\n%s\n%s\n\n%s\n", heading, sendLine, recvLine, flagHeading)
-		flag.PrintDefaults()
-	}
-	flag.Parse()
-	mode := strings.TrimSpace(*modeFlag)
-	if rawCmd != "" {
-		if mode != "" && mode != rawCmd {
-			fmt.Fprintf(os.Stderr, "error: conflicting mode: %s (flag) vs %s command\n", mode, rawCmd)
-			os.Exit(1)
-		}
-		mode = rawCmd
-	}
-	if *file == "" {
-		*file = preFile
-	}
-	if *code == "" {
-		*code = preCode
-	}
-	if extras := flag.Args(); len(extras) > 0 {
-		fmt.Fprintf(os.Stderr, "error: unexpected arguments: %s\n", strings.Join(extras, " "))
-		os.Exit(1)
-	}
-
-	// Avoid starting interactive UI/transfer work during `go test`.
-	if runningUnderGoTest() {
+	opts, err := parseCLI(os.Args[1:])
+	switch {
+	case errors.Is(err, errShowHelp):
 		return
-	}
-
-	// If the pairing code isn't provided, prompt interactively in recv mode.
-	if mode == "recv" && *code == "" {
-		entered, err := promptForCode()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "error reading code:", err)
-			os.Exit(1)
-		}
-		*code = entered
-	}
-
-	// Validate after argument normalization and optional prompting.
-	if err := validateArgs(mode, *file); err != nil {
+	case err != nil:
 		fmt.Fprintln(os.Stderr, "error:", err)
-		flag.Usage()
 		os.Exit(1)
 	}
+	if err := execute(opts); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+func execute(opt options) error {
+	if runningUnderGoTest() {
+		return nil
+	}
+
+	if opt.Mode == "info" {
+		return runInfo(opt)
+	}
+
+	mode := opt.Mode
+	file := opt.File
+	code := opt.Code
+	downloadDir := opt.DownloadDir
 
 	if mode == "recv" {
-		dir := *downloadDir
-		if dir == "" {
-			dir = "."
+		if code == "" {
+			entered, err := promptForCode()
+			if err != nil {
+				return fmt.Errorf("error reading code: %w", err)
+			}
+			code = entered
 		}
-		absDir, err := filepath.Abs(dir)
+		if downloadDir == "" {
+			downloadDir = "."
+		}
+		absDir, err := filepath.Abs(downloadDir)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "invalid download directory:", err)
-			os.Exit(1)
+			return fmt.Errorf("invalid download directory: %w", err)
 		}
 		if err := ensureDownloadDir(absDir); err != nil {
-			fmt.Fprintln(os.Stderr, "download directory error:", err)
-			os.Exit(1)
+			return fmt.Errorf("download directory error: %w", err)
 		}
-		*downloadDir = absDir
+		downloadDir = absDir
 	} else {
-		*downloadDir = ""
+		downloadDir = ""
+	}
+
+	if err := validateArgs(mode, file); err != nil {
+		return err
 	}
 
 	var (
 		logCloser    io.Closer
 		fileReporter transport.Reporter
 	)
-
-	// Logging if needed
-	if *logFile != "" {
-		f, err := os.OpenFile(*logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if opt.LogFile != "" {
+		f, err := os.OpenFile(opt.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "failed to open log file:", err)
-			os.Exit(1)
+			return fmt.Errorf("failed to open log file: %w", err)
 		}
 		logCloser = f
 		fileReporter = newFileReporter(f)
-		fmt.Fprintf(os.Stderr, "wormzy: logging detailed output to %s\n", *logFile)
+		fmt.Fprintf(os.Stderr, "wormzy: logging detailed output to %s\n", opt.LogFile)
 		defer logCloser.Close()
 	}
 
-	//  Here we setup context.Cancel the transfer on SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Resolve relay address from flag/env/default.
-	relayAddr := resolveRelay(*relay)
-
-	// Transport config is the single source of truth for the session.
+	relayAddr := resolveRelay(opt.Relay)
 	cfg := transport.Config{
 		Mode:             mode,
-		FilePath:         *file,
-		Code:             *code,
+		FilePath:         file,
+		Code:             code,
 		RelayAddr:        relayAddr,
-		RelayPin:         *relayPin,
-		HandshakeTimeout: *timeout,
-		IdleTimeout:      *idleTO,
-		Loopback:         *loopback,
-		DownloadDir:      *downloadDir,
+		RelayPin:         opt.RelayPin,
+		HandshakeTimeout: opt.Timeout,
+		IdleTimeout:      opt.IdleTimeout,
+		Loopback:         opt.DevLoopback,
+		DownloadDir:      downloadDir,
 	}
 
-	// If we don't have an interactive terminal, run without the Bubble Tea UI.
 	if !hasTTY() {
 		runHeadless(ctx, cfg, fileReporter)
-		return
+		return nil
 	}
 
-	// Start the TUI and run the transfer concurrently.
 	session := ui.Session{
 		Mode:        strings.ToUpper(mode),
-		File:        displayFile(mode, *file),
+		File:        displayFile(mode, file),
 		Relay:       relayAddr,
-		Code:        *code,
-		ShowNetwork: *showNetwork,
-		DownloadDir: *downloadDir,
+		Code:        code,
+		ShowNetwork: opt.ShowNetwork,
+		DownloadDir: downloadDir,
 	}
 	model := ui.NewModel(session)
 	prog := tea.NewProgram(model, tea.WithAltScreen())
 
-	// Fan out transport reporting to the UI and the optional log file.
 	reporter := combineReporters(ui.NewReporter(prog), fileReporter)
 	done := make(chan error, 1)
 
 	go func() {
-		// Run the transport in the background and notify the UI when it finishes.
 		result, err := transport.Run(ctx, cfg, reporter)
 		done <- err
 		prog.Send(ui.DoneMsg{Result: result, Err: err})
 	}()
 
 	if _, err := prog.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "ui error:", err)
-		os.Exit(1)
+		return fmt.Errorf("ui error: %w", err)
 	}
 
-	// Ensure the background transfer is canceled even if the UI exits first.
 	stop()
 
 	if err := <-done; err != nil {
-		os.Exit(1)
+		return err
 	}
+	return nil
+}
+
+func parseCLI(args []string) (options, error) {
+	if len(args) == 0 {
+		printGeneralUsage()
+		return options{}, errShowHelp
+	}
+	switch args[0] {
+	case "send":
+		return parseSend(args[1:])
+	case "recv":
+		return parseRecv(args[1:])
+	case "info":
+		return parseInfo(args[1:])
+	case "help", "-h", "--help":
+		printGeneralUsage()
+		return options{}, errShowHelp
+	default:
+		printGeneralUsage()
+		return options{}, fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+func parseSend(args []string) (options, error) {
+	opt := options{Mode: "send"}
+	fs := flag.NewFlagSet("send", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opt.File, "file", "", "file to send (optional if provided positionally)")
+	registerSharedFlags(fs, &opt)
+	fs.Usage = printSendUsage
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printSendUsage()
+			return options{}, errShowHelp
+		}
+		printSendUsage()
+		return options{}, err
+	}
+	rest := fs.Args()
+	if opt.File == "" && len(rest) > 0 {
+		opt.File = rest[0]
+		rest = rest[1:]
+	}
+	if len(rest) > 0 {
+		printSendUsage()
+		return options{}, fmt.Errorf("unexpected arguments: %s", strings.Join(rest, " "))
+	}
+	if opt.File == "" {
+		printSendUsage()
+		return options{}, fmt.Errorf("send requires a file (wormzy send <file>)")
+	}
+	return opt, nil
+}
+
+func parseRecv(args []string) (options, error) {
+	opt := options{Mode: "recv", DownloadDir: "."}
+	fs := flag.NewFlagSet("recv", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opt.Code, "code", "", "wormzy pairing code")
+	fs.StringVar(&opt.DownloadDir, "download-dir", ".", "directory to store received files")
+	registerSharedFlags(fs, &opt)
+	fs.Usage = printRecvUsage
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printRecvUsage()
+			return options{}, errShowHelp
+		}
+		printRecvUsage()
+		return options{}, err
+	}
+	rest := fs.Args()
+	if opt.Code == "" && len(rest) > 0 {
+		opt.Code = rest[0]
+		rest = rest[1:]
+	}
+	if len(rest) > 0 {
+		printRecvUsage()
+		return options{}, fmt.Errorf("unexpected arguments: %s", strings.Join(rest, " "))
+	}
+	return opt, nil
+}
+
+func parseInfo(args []string) (options, error) {
+	opt := options{Mode: "info"}
+	fs := flag.NewFlagSet("info", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opt.Relay, "relay", "", "override relay URL/address to check")
+	fs.Usage = printInfoUsage
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printInfoUsage()
+			return options{}, errShowHelp
+		}
+		printInfoUsage()
+		return options{}, err
+	}
+	if extra := fs.Args(); len(extra) > 0 {
+		printInfoUsage()
+		return options{}, fmt.Errorf("unexpected arguments: %s", strings.Join(extra, " "))
+	}
+	return opt, nil
+}
+
+func registerSharedFlags(fs *flag.FlagSet, opt *options) {
+	fs.StringVar(&opt.Relay, "relay", "", "redis address/URL for rendezvous (defaults to WORMZY_RELAY_URL or 127.0.0.1:6379)")
+	fs.StringVar(&opt.RelayPin, "relay-pin", "", "base64(SHA256(SPKI)) pin for rendezvous TLS")
+	fs.DurationVar(&opt.Timeout, "timeout", 90*time.Second, "handshake timeout before giving up on pairing")
+	fs.DurationVar(&opt.IdleTimeout, "idle-timeout", 5*time.Minute, "max idle time after pairing before aborting a stalled transfer")
+	fs.BoolVar(&opt.DevLoopback, "dev-loopback", false, "use local addresses for testing")
+	fs.BoolVar(&opt.ShowNetwork, "show-network", false, "display relay/STUN diagnostics in the UI")
+	fs.StringVar(&opt.LogFile, "log-file", "", "append detailed session logs to the given file")
+}
+
+func printGeneralUsage() {
+	fmt.Println(usageHeadingStyle.Render("Usage"))
+	fmt.Println(usageCommandStyle.Render("  wormzy send <file> [flags]"))
+	fmt.Println(usageCommandStyle.Render("  wormzy recv [code] [flags]"))
+	fmt.Println(usageCommandStyle.Render("  wormzy info [flags]"))
+	fmt.Println()
+	fmt.Println(usageDescStyle.Render("Use `wormzy <command> -h` for command-specific flags."))
+}
+
+func printSendUsage() {
+	fmt.Println(usageHeadingStyle.Render("wormzy send"))
+	fmt.Println(usageDescStyle.Render("Send a file to your peer. Provide the file as a positional argument or with --file."))
+	fmt.Println()
+	fmt.Println(usageHeadingStyle.Render("Flags"))
+	fmt.Println(formatFlagLine("--file", "file to send (optional if provided positionally)"))
+	printSharedFlags()
+}
+
+func printRecvUsage() {
+	fmt.Println(usageHeadingStyle.Render("wormzy recv"))
+	fmt.Println(usageDescStyle.Render("Receive a file from your peer. Leave the code blank to be prompted interactively."))
+	fmt.Println()
+	fmt.Println(usageHeadingStyle.Render("Flags"))
+	fmt.Println(formatFlagLine("--code", "pairing code provided by the sender"))
+	fmt.Println(formatFlagLine("--download-dir", "directory to store received files (default .)"))
+	printSharedFlags()
+}
+
+func printSharedFlags() {
+	fmt.Println(formatFlagLine("--relay", "redis address/URL for rendezvous (defaults to env WORMZY_RELAY_URL)"))
+	fmt.Println(formatFlagLine("--relay-pin", "base64(SHA256(SPKI)) pin for rendezvous TLS"))
+	fmt.Println(formatFlagLine("--timeout", "handshake timeout before giving up on pairing (default 1m30s)"))
+	fmt.Println(formatFlagLine("--idle-timeout", "max idle time after pairing before aborting (default 5m0s)"))
+	fmt.Println(formatFlagLine("--dev-loopback", "keep traffic on localhost for demos"))
+	fmt.Println(formatFlagLine("--show-network", "display relay/STUN diagnostics in the UI"))
+	fmt.Println(formatFlagLine("--log-file", "append detailed session logs to the given file"))
+}
+
+func printInfoUsage() {
+	fmt.Println(usageHeadingStyle.Render("wormzy info"))
+	fmt.Println(usageDescStyle.Render("Check which relay will be used and whether it is reachable."))
+	fmt.Println()
+	fmt.Println(usageHeadingStyle.Render("Flags"))
+	fmt.Println(formatFlagLine("--relay", "override relay URL/address to probe"))
+}
+
+func formatFlagLine(name, desc string) string {
+	return fmt.Sprintf("  %s %s", usageFlagStyle.Render(name), usageDescStyle.Render(desc))
+}
+
+func runInfo(opt options) error {
+	relay := resolveRelay(opt.Relay)
+	fmt.Println(usageHeadingStyle.Render("Relay probe"))
+	env := os.Getenv("WORMZY_RELAY_URL")
+	if env == "" {
+		env = "(not set)"
+	}
+	fmt.Println(formatFlagLine("Resolved relay", relay))
+	fmt.Println(formatFlagLine("WORMZY_RELAY_URL", env))
+	if err := probeRelay(relay); err != nil {
+		fmt.Println(formatFlagLine("Status", fmt.Sprintf("unreachable (%v)", err)))
+		return err
+	}
+	fmt.Println(formatFlagLine("Status", "reachable"))
+	return nil
+}
+
+func probeRelay(relay string) error {
+	target, err := relayDialTarget(relay)
+	if err != nil {
+		return err
+	}
+	conn, err := net.DialTimeout("tcp", target, 3*time.Second)
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
+}
+
+func relayDialTarget(relay string) (string, error) {
+	if strings.Contains(relay, "://") {
+		u, err := url.Parse(relay)
+		if err != nil {
+			return "", err
+		}
+		host := u.Host
+		if host == "" {
+			host = u.Path
+		}
+		if !strings.Contains(host, ":") {
+			switch u.Scheme {
+			case "https", "wss":
+				host += ":443"
+			case "redis", "rediss":
+				host += ":6379"
+			default:
+				host += ":80"
+			}
+		}
+		return host, nil
+	}
+	return relay, nil
 }
 
 // validateArgs checks required arguments for the chosen mode.
@@ -296,28 +491,6 @@ func runHeadless(ctx context.Context, cfg transport.Config, extra transport.Repo
 			fmt.Printf("Path: %s (%s)\n", strings.ToUpper(result.Transport), result.Candidate)
 		}
 	}
-}
-
-func normalizeArgs(args []string) (command, fileArg, codeArg string, remaining []string) {
-	if len(args) == 0 {
-		return "", "", "", args
-	}
-	first := args[0]
-	if first != "send" && first != "recv" {
-		return "", "", "", args
-	}
-	command = first
-	copyArgs := append([]string(nil), args[1:]...)
-	if len(copyArgs) > 0 && !strings.HasPrefix(copyArgs[0], "-") {
-		switch command {
-		case "send":
-			fileArg = copyArgs[0]
-		case "recv":
-			codeArg = copyArgs[0]
-		}
-		copyArgs = copyArgs[1:]
-	}
-	return command, fileArg, codeArg, copyArgs
 }
 
 // promptForCode reads a pairing code from stdin.
