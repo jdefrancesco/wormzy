@@ -36,22 +36,6 @@ By default the receiver saves into the current working directory. Override this 
 `wormzy recv -download-dir ~/Downloads`—Wormzy will create the directory if needed and
 will refuse the transfer up front if the filesystem cannot hold the advertised file size.
 
-## Systemd units
-
-ators who want the relay proxy to restart automatically can install the provided
-`deploy/systemd/wormzy-mailbox.service`:
-
-1. Copy the unit into `/etc/systemd/system/`.
-2. Create `/etc/wormzy/mailbox.env` with at least:
-   ```bash
-   WORMZY_MAILBOX_LISTEN=:9000
-   WORMZY_MAILBOX_REDIS=rediss://default:password@example.com:25061
-   ```
-3. `sudo systemctl daemon-reload && sudo systemctl enable --now wormzy-mailbox`.
-
-The unit runs the `/usr/local/bin/mailbox` binary, restarts on failure, and keeps Redis
-credentials outside the unit file so you can rotate them without editing service config.
-
 ## Screenshots
 
 Add screenshots (or a short screencast thumbnail) under `docs/screenshots/` and link them here.
