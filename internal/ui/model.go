@@ -61,6 +61,10 @@ type step struct {
 	State  transport.StageState
 }
 
+func (st step) renderDetail() string {
+	return st.Detail
+}
+
 // NewModel returns a Bubble Tea model wired for the Wormzy workflow.
 func NewModel(session Session) Model {
 	steps := []step{
@@ -106,6 +110,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.detail != "" {
 				m.steps[idx].Detail = msg.detail
 			}
+		}
+		if msg.stage == transport.StageRendezvous && strings.HasPrefix(msg.detail, "code ") {
+			m.session.Code = strings.TrimSpace(strings.TrimPrefix(msg.detail, "code "))
 		}
 		m.progress = progressFromSteps(m.steps)
 	case DoneMsg:
@@ -200,7 +207,7 @@ func renderSteps(steps []step) string {
 	for _, st := range steps {
 		lines = append(lines, fmt.Sprintf("%s %s", stepIcon(st.State), stepTitleStyle.Render(st.Title)))
 		if st.Detail != "" {
-			lines = append(lines, "   "+subtleStyle.Render(st.Detail))
+			lines = append(lines, "   "+subtleStyle.Render(st.renderDetail()))
 		}
 	}
 	return boxStyle.Render(strings.Join(lines, "\n"))
