@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -393,6 +395,9 @@ func runInfo(opt options) error {
 }
 
 func probeRelay(relay string) error {
+	if strings.HasPrefix(relay, "http://") || strings.HasPrefix(relay, "https://") {
+		return probeHTTPRelay(relay)
+	}
 	target, err := relayDialTarget(relay)
 	if err != nil {
 		return err
@@ -402,6 +407,24 @@ func probeRelay(relay string) error {
 		return err
 	}
 	_ = conn.Close()
+	return nil
+}
+
+func probeHTTPRelay(relay string) error {
+	u, err := url.Parse(relay)
+	if err != nil {
+		return err
+	}
+	u.Path = path.Join(u.Path, "/healthz")
+	client := http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(u.String())
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("healthz returned %s", resp.Status)
+	}
 	return nil
 }
 

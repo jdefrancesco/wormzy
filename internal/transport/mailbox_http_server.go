@@ -43,6 +43,8 @@ func (s *MailboxHTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleReceive(w, r)
 	case "/v1/stats":
 		s.handleStats(w, r)
+	case "/healthz":
+		s.handleHealthz(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -200,4 +202,12 @@ func writeHTTPError(w http.ResponseWriter, status int, err error) {
 func writeHTTPJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (s *MailboxHTTPServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if err := s.client.Ping(r.Context()).Err(); err != nil {
+		writeHTTPError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	writeHTTPJSON(w, map[string]string{"status": "ok"})
 }
