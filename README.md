@@ -36,6 +36,19 @@ By default the receiver saves into the current working directory. Override this 
 `wormzy recv -download-dir ~/Downloads`—Wormzy will create the directory if needed and
 will refuse the transfer up front if the filesystem cannot hold the advertised file size.
 
+## Testing
+
+Run `make test` to exercise all non-mvp packages.
+
+Focused sweeps:
+- `make test-transport` — transport unit tests.
+- `make test-stun` — STUN socket tests (auto-skip when UDP is blocked).
+
+Full sweep:
+- `make test-all` — runs core, transport, and STUN suites.
+
+The STUN tests bind UDP sockets; they will automatically skip on environments that block UDP (for example, some CI or container sandboxes).
+
 ## Screenshots
 
 Add screenshots (or a short screencast thumbnail) under `docs/screenshots/` and link them here.

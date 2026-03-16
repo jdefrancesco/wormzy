@@ -33,6 +33,13 @@ test-core:
 test-stun:
 	$(GOTEST) -v ./internal/stun
 
+.PHONY: test-transport
+test-transport:
+	$(GOTEST) -v ./internal/transport
+
+.PHONY: test-all
+test-all: test-core test-transport test-stun
+
 .PHONY: install
 install:
 	@for bin in $(BINARIES); do \

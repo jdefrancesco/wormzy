@@ -13,8 +13,10 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"math/big"
 	"net"
@@ -727,7 +729,13 @@ func receiveFile(conn *quic.Conn, key []byte, downloadDir string, rep Reporter) 
 	if err := ensureFreeSpace(targetDir, size); err != nil {
 		return "", nil, 0, err
 	}
-	outPath := filepath.Join(targetDir, name)
+	outPath, renamed, err := pickDownloadPath(targetDir, name)
+	if err != nil {
+		return "", nil, 0, err
+	}
+	if renamed && rep != nil {
+		rep.Logf("target %s exists; saving as %s", filepath.Join(targetDir, name), outPath)
+	}
 
 	out, err := os.Create(outPath)
 	if err != nil {
@@ -775,6 +783,48 @@ func sanitizeFilename(s string) string {
 	s = strings.ReplaceAll(s, "/", "_")
 	s = strings.ReplaceAll(s, "\\", "_")
 	return s
+}
+
+func pickDownloadPath(dir, filename string) (string, bool, error) {
+	base := filepath.Join(dir, filename)
+	exists, err := pathExists(base)
+	if err != nil {
+		return "", false, err
+	}
+	if !exists {
+		return base, false, nil
+	}
+
+	ext := filepath.Ext(filename)
+	stem := strings.TrimSuffix(filename, ext)
+	for i := 1; i <= 99; i++ {
+		candidate := filepath.Join(dir, fmt.Sprintf("%s (wormzy-%d)%s", stem, i, ext))
+		exists, err := pathExists(candidate)
+		if err != nil {
+			return "", false, err
+		}
+		if !exists {
+			return candidate, true, nil
+		}
+	}
+	var randBuf [4]byte
+	if _, err := rand.Read(randBuf[:]); err == nil {
+		candidate := filepath.Join(dir, fmt.Sprintf("%s-%s%s", stem, hex.EncodeToString(randBuf[:]), ext))
+		return candidate, true, nil
+	}
+	return "", false, fmt.Errorf("unable to find free destination for %s", filename)
+}
+
+func pathExists(p string) (bool, error) {
+	_, err := os.Stat(p)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 func localEndpoint(conn *net.UDPConn) string {
