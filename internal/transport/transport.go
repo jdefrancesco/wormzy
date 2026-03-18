@@ -134,23 +134,30 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 	reporter.Logf("udp/listen %s", udpConn.LocalAddr())
 
 	self := rendezvous.SelfInfo{Local: localEndpoint(udpConn)}
-	ctxStun, cancelStun := context.WithTimeout(ctx, cfg.HandshakeTimeout)
-	reporter.Stage(StageSTUN, StageStateRunning, "probing reflexive address")
-	pub, err := stun.DiscoverOnConn(ctxStun, udpConn, cfg.stunServers(), 2*time.Second, 2)
-	cancelStun()
-	if err != nil {
-		reporter.Stage(StageSTUN, StageStateError, err.Error())
-		reporter.Logf("stun discovery failed: %v", err)
-	} else {
-		self.Public = pub.String()
-		reporter.Stage(StageSTUN, StageStateDone, self.Public)
-		reporter.Logf("public address %s", self.Public)
+	if cfg.Loopback {
+		if addr, ok := udpConn.LocalAddr().(*net.UDPAddr); ok {
+			self.Local = net.JoinHostPort("127.0.0.1", strconv.Itoa(addr.Port))
+		}
 	}
 	if cfg.Loopback {
 		self.Public = self.Local
-	}
-	if self.Public == "" {
-		self.Public = self.Local
+		reporter.Stage(StageSTUN, StageStateDone, "loopback")
+	} else {
+		ctxStun, cancelStun := context.WithTimeout(ctx, cfg.HandshakeTimeout)
+		reporter.Stage(StageSTUN, StageStateRunning, "probing reflexive address")
+		pub, err := stun.DiscoverOnConn(ctxStun, udpConn, cfg.stunServers(), 2*time.Second, 2)
+		cancelStun()
+		if err != nil {
+			reporter.Stage(StageSTUN, StageStateError, err.Error())
+			reporter.Logf("stun discovery failed: %v", err)
+		} else {
+			self.Public = pub.String()
+			reporter.Stage(StageSTUN, StageStateDone, self.Public)
+			reporter.Logf("public address %s", self.Public)
+		}
+		if self.Public == "" {
+			self.Public = self.Local
+		}
 	}
 	self.Candidates = buildCandidates(self, cfg.Loopback)
 

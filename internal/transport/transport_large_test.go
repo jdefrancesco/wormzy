@@ -7,7 +7,19 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	miniredis "github.com/alicebob/miniredis/v2"
 )
+
+type tReporter struct{ t *testing.T }
+
+func (r tReporter) Logf(format string, args ...interface{}) {
+	r.t.Logf(format, args...)
+}
+
+func (r tReporter) Stage(stage Stage, state StageState, detail string) {
+	r.t.Logf("stage %s %v %s", stage, state, detail)
+}
 
 // Integration-ish check: loopback transfer of a multi-MB file with idle timeouts enforced.
 // Skipped under -short to keep CI quick.
@@ -18,6 +30,12 @@ func TestLargeTransferLoopback(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
+
+	mini, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mini.Close()
 
 	// Build a ~8 MiB random file.
 	tmpDir := t.TempDir()
@@ -38,31 +56,35 @@ func TestLargeTransferLoopback(t *testing.T) {
 		t.Fatalf("mkdir recv: %v", err)
 	}
 
-	errCh := make(chan error, 1)
+	sendCh := make(chan error, 1)
 	go func() {
 		_, err := Run(ctx, Config{
-			Mode:        "recv",
+			Mode:        "send",
+			FilePath:    srcPath,
 			Code:        code,
+			RelayAddr:   mini.Addr(),
 			Loopback:    true,
 			IdleTimeout: idle,
-			DownloadDir: recvDir,
-		}, ReporterFunc(func(string, ...interface{}) {}))
-		errCh <- err
+		}, tReporter{t})
+		sendCh <- err
 	}()
 
-	_, err := Run(ctx, Config{
-		Mode:        "send",
-		FilePath:    srcPath,
+	time.Sleep(200 * time.Millisecond)
+
+	_, err = Run(ctx, Config{
+		Mode:        "recv",
 		Code:        code,
+		RelayAddr:   mini.Addr(),
 		Loopback:    true,
 		IdleTimeout: idle,
-	}, ReporterFunc(func(string, ...interface{}) {}))
+		DownloadDir: recvDir,
+	}, tReporter{t})
 	if err != nil {
-		t.Fatalf("sender run: %v", err)
+		t.Fatalf("receiver run: %v", err)
 	}
 
-	if err := <-errCh; err != nil {
-		t.Fatalf("receiver run: %v", err)
+	if err := <-sendCh; err != nil {
+		t.Fatalf("sender run: %v", err)
 	}
 
 	dstPath := filepath.Join(recvDir, "large.bin")
