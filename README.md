@@ -49,6 +49,10 @@ Full sweep:
 
 The STUN tests bind UDP sockets; they will automatically skip on environments that block UDP (for example, some CI or container sandboxes).
 
+## Deploying updated binaries
+
+On a server with the systemd units installed, run `make deploy`. It builds the binaries, installs them to `/usr/local/bin`, reloads systemd, and restarts `wormzy-mailbox` and `wormzy-rendezvous` (ignored if those services are absent).
+
 ## Screenshots
 
 Add screenshots (or a short screencast thumbnail) under `docs/screenshots/` and link them here.

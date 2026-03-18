@@ -13,6 +13,11 @@ BINARIES := wormzy rendezvous stuncheck mailbox dashboard
 
 all: test build 
 
+deploy: build install
+	-@sudo systemctl daemon-reload
+	-@sudo systemctl restart wormzy-mailbox.service
+	-@sudo systemctl restart wormzy-rendezvous.service
+
 debug:
 	$(GOBUILD) -o $(DEFAULT_BINARY) -gcflags "all=-N -l" -v ./cmd/wormzy
 

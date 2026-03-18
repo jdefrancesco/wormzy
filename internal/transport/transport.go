@@ -277,7 +277,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 	switch cfg.Mode {
 	case "send":
 		reporter.Stage(StageTransfer, StageStateRunning, "streaming file")
-		sum, size, err := sendFileEncrypted(quicConn, cfg.FilePath, fileKey, reporter)
+		sum, size, err := sendFileEncrypted(quicConn, cfg.FilePath, fileKey, cfg.IdleTimeout, reporter)
 		if err != nil {
 			reporter.Stage(StageTransfer, StageStateError, err.Error())
 			return nil, err
@@ -289,7 +289,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		reporter.Stage(StageTransfer, StageStateDone, "file sent")
 	case "recv":
 		reporter.Stage(StageTransfer, StageStateRunning, "receiving file")
-		path, sum, size, err := receiveFile(quicConn, fileKey, cfg.DownloadDir, reporter)
+		path, sum, size, err := receiveFile(quicConn, fileKey, cfg.DownloadDir, cfg.IdleTimeout, reporter)
 		if err != nil {
 			reporter.Stage(StageTransfer, StageStateError, err.Error())
 			return nil, err
@@ -599,7 +599,10 @@ func (r *aeadReader) ReadChunk() ([]byte, error) {
 	return pt, nil
 }
 
-func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) ([]byte, int64, error) {
+func sendFileEncrypted(conn *quic.Conn, path string, key []byte, idle time.Duration, rep Reporter) ([]byte, int64, error) {
+	if idle <= 0 {
+		idle = defaultTransferIdleTO
+	}
 	fi, err := os.Stat(path)
 	if err != nil {
 		return nil, 0, err
@@ -637,6 +640,14 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) (
 		return nil, 0, err
 	}
 	writer := &aeadWriter{w: us, aead: aead, baseNonce: base}
+	setWriteDeadline := func() {
+		_ = us.SetWriteDeadline(time.Now().Add(idle))
+	}
+	clearDeadline := func() {
+		_ = us.SetWriteDeadline(time.Time{})
+	}
+	setWriteDeadline()
+	defer clearDeadline()
 
 	header := make([]byte, fileHeaderFixedLen+len(name))
 	binary.LittleEndian.PutUint16(header[0:fileHeaderNameLenSize], uint16(len(name)))
@@ -657,6 +668,7 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) (
 			if _, err := hasher.Write(buf[:n]); err != nil {
 				return nil, 0, err
 			}
+			setWriteDeadline()
 			if err := writer.WriteChunk(buf[:n]); err != nil {
 				return nil, 0, err
 			}
@@ -688,7 +700,10 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, rep Reporter) (
 	return meta.Digest, size, nil
 }
 
-func receiveFile(conn *quic.Conn, key []byte, downloadDir string, rep Reporter) (string, []byte, int64, error) {
+func receiveFile(conn *quic.Conn, key []byte, downloadDir string, idle time.Duration, rep Reporter) (string, []byte, int64, error) {
+	if idle <= 0 {
+		idle = defaultTransferIdleTO
+	}
 	stream, err := conn.AcceptUniStream(context.Background())
 	if err != nil {
 		return "", nil, 0, err
@@ -704,6 +719,14 @@ func receiveFile(conn *quic.Conn, key []byte, downloadDir string, rep Reporter) 
 		return "", nil, 0, err
 	}
 	reader := &aeadReader{r: stream, aead: aead, baseNonce: base}
+	setReadDeadline := func() {
+		_ = stream.SetReadDeadline(time.Now().Add(idle))
+	}
+	clearReadDeadline := func() {
+		_ = stream.SetReadDeadline(time.Time{})
+	}
+	setReadDeadline()
+	defer clearReadDeadline()
 
 	hdr, err := reader.ReadChunk()
 	if err != nil {
@@ -748,6 +771,7 @@ func receiveFile(conn *quic.Conn, key []byte, downloadDir string, rep Reporter) 
 	lastPct := -1
 
 	for {
+		setReadDeadline()
 		chunk, err := reader.ReadChunk()
 		if err == io.EOF {
 			break
@@ -772,6 +796,7 @@ func receiveFile(conn *quic.Conn, key []byte, downloadDir string, rep Reporter) 
 		return "", nil, 0, fmt.Errorf("expected %d bytes, wrote %d", size, written)
 	}
 
+	setReadDeadline()
 	sum := hasher.Sum(nil)
 	if err := verifyMetadata(reader, sum); err != nil {
 		return "", nil, 0, err
