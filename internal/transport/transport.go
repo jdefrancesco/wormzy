@@ -125,6 +125,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	started := time.Now()
 
 	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
@@ -195,6 +196,10 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		stats.Completed = finalErr == nil
 		if finalErr != nil {
 			stats.Error = finalErr.Error()
+		}
+		stats.DurationMillis = time.Since(started).Milliseconds()
+		if res != nil {
+			stats.Bytes = res.FileSize
 		}
 		if err := mbox.ReportStats(ctx, stats); err != nil {
 			reporter.Logf("report stats failed: %v", err)

@@ -182,6 +182,15 @@ func renderSummary(metrics *transport.RelayMetrics, loading bool) string {
 		fmt.Sprintf("Failed            %s", summaryValue(metrics.FailedSessions)),
 		fmt.Sprintf("P2P vs Relay      %s / %s", summaryValue(metrics.P2PTransfers), summaryValue(metrics.RelayTransfers)),
 	}
+	if metrics.TotalBytes > 0 {
+		lines = append(lines, fmt.Sprintf("Data transferred  %s", summaryBytes(metrics.TotalBytes)))
+	}
+	if metrics.AvgDuration > 0 {
+		lines = append(lines, fmt.Sprintf("Avg duration      %s", subtleStyle.Render(humanDuration(metrics.AvgDuration))))
+	}
+	if metrics.AvgThroughputMBps > 0 {
+		lines = append(lines, fmt.Sprintf("Avg throughput    %s", subtleStyle.Render(fmt.Sprintf("%.1f MB/s", metrics.AvgThroughputMBps))))
+	}
 	if loading {
 		lines = append(lines, "")
 		lines = append(lines, warningStyle.Render("Refreshing…"))
@@ -260,6 +269,10 @@ func summaryValue(v int) string {
 	return summaryValueStyle.Render(fmt.Sprintf("%d", v))
 }
 
+func summaryBytes(v int64) string {
+	return summaryValueStyle.Render(formatBytes(v))
+}
+
 func stateStyle(state string) string {
 	switch strings.ToLower(state) {
 	case "p2p":
@@ -315,14 +328,28 @@ func humanDuration(d time.Duration) string {
 	}
 }
 
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	value := float64(b) / float64(div)
+	return fmt.Sprintf("%.1f %ciB", value, "KMGTPE"[exp])
+}
+
 var (
-	headerStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFB3C6")).Bold(true)
-	titleStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD1DC")).Bold(true)
-	bubbleBoxStyle     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).BorderForeground(lipgloss.Color("#FF9EC4"))
-	errorBoxStyle      = lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).BorderForeground(lipgloss.Color("#FF4F8B")).Padding(0, 1)
-	summaryValueStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#5DFFB4")).Bold(true)
-	subtleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#C8B5C9"))
-	warningStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8FA3")).Bold(true)
-	errorStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4D6D")).Bold(true)
-	successStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#5DFF8D")).Bold(true)
+	headerStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFB3C6")).Bold(true)
+	titleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD1DC")).Bold(true)
+	bubbleBoxStyle    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).BorderForeground(lipgloss.Color("#FF9EC4"))
+	errorBoxStyle     = lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).BorderForeground(lipgloss.Color("#FF4F8B")).Padding(0, 1)
+	summaryValueStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#5DFFB4")).Bold(true)
+	subtleStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#C8B5C9"))
+	warningStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8FA3")).Bold(true)
+	errorStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4D6D")).Bold(true)
+	successStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#5DFF8D")).Bold(true)
 )

@@ -34,6 +34,9 @@ type RelayMetrics struct {
 	FailedSessions     int
 	P2PTransfers       int
 	RelayTransfers     int
+	TotalBytes         int64
+	AvgDuration        time.Duration
+	AvgThroughputMBps  float64
 	Active             []SessionSnapshot
 	Recent             []SessionSnapshot
 }
@@ -45,6 +48,8 @@ type SessionSnapshot struct {
 	State        string
 	Transport    string
 	Candidate    string
+	Bytes        int64
+	Duration     time.Duration
 	Completed    bool
 	Error        string
 	CreatedAt    time.Time
@@ -87,6 +92,7 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 	report := &RelayMetrics{
 		Generated: time.Now(),
 	}
+	var totalDuration time.Duration
 	pattern := fmt.Sprintf("%s:sessions:*", mc.prefix)
 	var cursor uint64
 	for {
@@ -95,8 +101,8 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 			return nil, err
 		}
 		cursor = nextCursor
-			if len(keys) > 0 {
-				values, err := mc.client.MGet(ctx, keys...).Result()
+		if len(keys) > 0 {
+			values, err := mc.client.MGet(ctx, keys...).Result()
 			if err != nil {
 				return nil, err
 			}
@@ -131,6 +137,8 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 						} else {
 							report.P2PTransfers++
 						}
+						report.TotalBytes += sess.Stats.Bytes
+						totalDuration += time.Duration(sess.Stats.DurationMillis) * time.Millisecond
 					} else {
 						report.FailedSessions++
 					}
@@ -153,6 +161,13 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 	})
 	if len(report.Recent) > maxRecentSessions {
 		report.Recent = report.Recent[:maxRecentSessions]
+	}
+	if report.CompletedSessions > 0 {
+		report.AvgDuration = totalDuration / time.Duration(report.CompletedSessions)
+		if report.AvgDuration > 0 {
+			avgBytes := float64(report.TotalBytes) / float64(report.CompletedSessions)
+			report.AvgThroughputMBps = (avgBytes / report.AvgDuration.Seconds()) / (1024 * 1024)
+		}
 	}
 	return report, nil
 }
@@ -186,6 +201,8 @@ func snapshotFromSession(sess *rendezvousSession, now time.Time) SessionSnapshot
 		snap.Mode = sess.Stats.Mode
 		snap.Transport = sess.Stats.Transport
 		snap.Candidate = sess.Stats.Candidate
+		snap.Bytes = sess.Stats.Bytes
+		snap.Duration = time.Duration(sess.Stats.DurationMillis) * time.Millisecond
 		snap.Completed = sess.Stats.Completed
 		snap.Error = sess.Stats.Error
 		if sess.Stats.UpdatedUnix > 0 {
