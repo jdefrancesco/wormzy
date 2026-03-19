@@ -206,7 +206,7 @@ func renderSessionPanels(metrics *transport.RelayMetrics) string {
 
 func renderSessionList(title string, sessions []transport.SessionSnapshot, ref time.Time, showTTL bool) string {
 	rows := []string{
-		fmt.Sprintf("%-12s %-16s %-10s %s", "Code", "State", "Age", columnLabel(showTTL)),
+		fmt.Sprintf("%-12s %-10s %-10s %-10s %s", "Code", "State", "Size", "Duration", columnLabel(showTTL)),
 	}
 	if len(sessions) == 0 {
 		rows = append(rows, subtleStyle.Render("no sessions to display"))
@@ -228,13 +228,13 @@ func columnLabel(showTTL bool) string {
 
 func renderSessionRow(sess transport.SessionSnapshot, ref time.Time, showTTL bool) string {
 	state := prettifyState(sess.State)
-	age := humanDuration(ref.Sub(sess.CreatedAt))
 	trailing := humanDuration(sessionTrailing(sess, ref, showTTL))
 	return fmt.Sprintf(
-		"%-12s %-16s %-10s %s",
+		"%-12s %-10s %-10s %-10s %s",
 		sess.Code,
 		stateStyle(state),
-		age,
+		formatBytes(sess.Bytes),
+		humanDuration(sess.Duration),
 		trailing,
 	)
 }
