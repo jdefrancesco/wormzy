@@ -24,16 +24,4 @@ Wormzy is a peer-to-peer file sender built around three subsystems: the CLI/UI (
 
 ## TLDR
 
-Pairing Code
-    ↓
-CPace PAKE
-    ↓
-Shared Secret
-    ↓
-Noise NN Handshake
-    ↓
-Session Keys
-    ↓
-XChaCha20-Poly1305 Stream
-    ↓
-BLAKE3 Verification
+Pairing Code -> CPace PAKE -> Shared Secret -> Noise NN Handshake -> Session Keys -> XChaCha20-Poly1305 Steam -> Blake3 Verification
