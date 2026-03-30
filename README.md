@@ -53,7 +53,7 @@ Large transfers run with per-stream idle timeouts; stalled sessions abort instea
 
 ## Deploying updated binaries
 
-On a server with the systemd units installed, run `make deploy`. It builds the binaries, installs them to `/usr/local/bin`, reloads systemd, and restarts `wormzy-mailbox` and `wormzy-rendezvous` (ignored if those services are absent).
+On a server with the `systemd` units installed, run `make deploy`. It builds the binaries, installs them to `/usr/local/bin`, reloads systemd, and restarts `wormzy-mailbox` and `wormzy-rendezvous` (ignored if those services are absent).
 
 ## Relay defaults
 
@@ -74,3 +74,7 @@ TBD
 ## Reporting a Vulnerability
 
 Please email jdefr89@gmail.com.
+
+## Data/Model Use Notice
+
+The code, text, and assets in this repository may not be used to train, fine-tune, or improve large language models or other generative AI systems without explicit written permission from the project owner.

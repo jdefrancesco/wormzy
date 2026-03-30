@@ -244,7 +244,20 @@ func parseSend(args []string) (options, error) {
 	fs.StringVar(&opt.File, "file", "", "file to send (optional if provided positionally)")
 	registerSharedFlags(fs, &opt)
 	fs.Usage = printSendUsage
-	if err := fs.Parse(args); err != nil {
+
+	// Allow the file argument in any position by plucking the first non-flag token
+	// before parsing flags.
+	var positional string
+	filtered := make([]string, 0, len(args))
+	for _, a := range args {
+		if positional == "" && !strings.HasPrefix(a, "-") {
+			positional = a
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+
+	if err := fs.Parse(filtered); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			printSendUsage()
 			return options{}, errShowHelp
@@ -253,6 +266,9 @@ func parseSend(args []string) (options, error) {
 		return options{}, err
 	}
 	rest := fs.Args()
+	if opt.File == "" && positional != "" {
+		opt.File = positional
+	}
 	if opt.File == "" && len(rest) > 0 {
 		opt.File = rest[0]
 		rest = rest[1:]
