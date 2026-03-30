@@ -15,7 +15,7 @@ include:
 Install the `wormzy` CLI:
 
 ```bash
-go install github.com/jdefrancesco/cmd/wormzy@latest
+go install github.com/jdefrancesco/wormzy/cmd/wormzy@latest
 ```
 
 On the sender:
