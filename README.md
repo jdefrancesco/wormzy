@@ -1,20 +1,23 @@
 # Wormzy
 
-Wormzy aims to be simple and secure way to share large files with another party.
+`wormzy` aims to be a simple, fast, and secure method to share large files with another party peer-2-peer. It's similar to 
+[Magic Wormhole](https://github.com/magic-wormhole/magic-wormhole) but it's built on more modern primitives and aims to be far
+more portable. 
 
-Wormzy allows users to send files directly to another party with ease. Its primary features
-include:
 
-* Send file of any size peer-to-peer. No need to change NAT rules.
+It's primary features include:
+
+* Send file of any size peer-to-peer with zero hassle. That means no need to change NAT rules or port forwarding.
 * Communication is secure/encrypted
-* Utilizes QUIC for fast transfers.
+* Utilizes QUIC for fast transfers. Blake3 is used for validating the entire, uncorrupted file was received!
 
 ## Why Wormzy
+
 - No setup for users: baked-in relay `https://relay.wormzy.io` works out of the box; overrides stay opt-in.
 - P2P-first: prioritizes direct UDP/QUIC; relays only as a fallback.
 - Human-friendly pairing codes and auto file collision handling (`example (wormzy-1).txt`).
 - Integrity and privacy: Noise + QUIC with SAS, disk-space preflight, and hash verification.
-- Cross-platform CLI with Bubble Tea UI plus headless mode for scripts/CI.
+- Cross-platform CLI with a beautiful TUI! Plus headless mode for scripts/CI *(in progress)*.
 
 ## Quick Start
 
@@ -28,7 +31,7 @@ On the sender:
 
 ```bash
 wormzy send ./big.bin
-# => displays a pairing code such as f7p9-x2
+# displays a pairing code such as f7p9-x2
 ```
 
 On the receiver (on another terminal/machine):
@@ -39,7 +42,7 @@ wormzy recv
 ```
 
 By default the receiver saves into the current working directory. Override this with
-`wormzy recv -download-dir ~/Downloads`—Wormzy will create the directory if needed and
+`wormzy recv -download-dir ~/Downloads` - `Wormzy` will create the directory if needed and
 will refuse the transfer up front if the filesystem cannot hold the advertised file size.
 
 ## Testing
@@ -47,8 +50,9 @@ will refuse the transfer up front if the filesystem cannot hold the advertised f
 Run `make test` to exercise all non-mvp packages.
 
 Focused sweeps:
-- `make test-transport` — transport unit tests.
-- `make test-stun` — STUN socket tests (auto-skip when UDP is blocked).
+
+* `make test-transport` — transport unit tests.
+* `make test-stun` — STUN socket tests (auto-skip when UDP is blocked).
 
 Full sweep:
 - `make test-all` — runs core, transport, and STUN suites.
@@ -67,9 +71,8 @@ The CLI ships with a baked-in relay (`https://relay.wormzy.io`). You don’t nee
 
 ## Screenshots
 
-Add your captures under `docs/screenshots/`:
-- ![Wormzy send](docs/screenshots/wormzy-send.png)
-- ![Wormzy receive](docs/screenshots/wormzy-receive.png)
+![Wormzy send](docs/screenshots/wormzy-send.png)
+![Wormzy receive](docs/screenshots/wormzy-receive.png)
 
 ## Reporting a Vulnerability
 

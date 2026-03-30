@@ -118,6 +118,9 @@ func (f ReporterFunc) Logf(format string, args ...interface{}) {
 func (f ReporterFunc) Stage(stage Stage, state StageState, detail string) {}
 
 // Run executes a full rendezvous + NAT punching flow for the configured mode.
+// It performs STUN discovery, rendezvous via the mailbox, Noise+QUIC handshake,
+// and then streams the file either as sender or receiver. The returned Result
+// includes session metadata and transfer stats.
 func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr error) {
 	reporter := rep
 	if reporter == nil {
@@ -364,6 +367,7 @@ func DefaultRelay() string {
 	return defaultRelay
 }
 
+// rendezvousExchange coordinates code assignment, PAKE, and peer discovery over the mailbox.
 func rendezvousExchange(ctx context.Context, cfg Config, me rendezvous.SelfInfo, rep Reporter, mb mailbox) (peer rendezvous.SelfInfo, assigned string, psk []byte, err error) {
 	code, err := mb.Claim(ctx, cfg.Code)
 	if err != nil {
@@ -389,6 +393,7 @@ func rendezvousExchange(ctx context.Context, cfg Config, me rendezvous.SelfInfo,
 	return *peerInfo, assigned, psk, nil
 }
 
+// runPAKEOverMailbox executes CPace over mailbox messages to derive a shared key.
 func runPAKEOverMailbox(ctx context.Context, mb mailbox, role, code, idA, idB string) ([]byte, error) {
 	ci := cpace.NewContextInfo(idA, idB, []byte("wormzy-pake-v1"))
 	if role == "send" {
@@ -462,6 +467,8 @@ func friendlyRendezvousErr(err error) error {
 	}
 }
 
+// runNoiseOverQUIC performs the Noise NN handshake over a QUIC stream and returns
+// the derived file key plus a short authentication string for human verification.
 func runNoiseOverQUIC(conn *quic.Conn, initiator bool, psk []byte) ([]byte, string, error) {
 	var stream *quic.Stream
 	var err error
@@ -627,6 +634,8 @@ func (r *aeadReader) ReadChunk() ([]byte, error) {
 	return pt, nil
 }
 
+// sendFileEncrypted streams a file over QUIC with per-chunk XChaCha20-Poly1305
+// encryption, enforcing idle timeouts and reporting progress.
 func sendFileEncrypted(conn *quic.Conn, path string, key []byte, idle time.Duration, rep Reporter) ([]byte, int64, error) {
 	if idle <= 0 {
 		idle = defaultTransferIdleTO
@@ -728,6 +737,8 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, idle time.Durat
 	return meta.Digest, size, nil
 }
 
+// receiveFile pulls the encrypted stream, writes it to disk with collision-safe
+// naming, verifies the metadata trailer, and reports progress.
 func receiveFile(conn *quic.Conn, key []byte, downloadDir string, idle time.Duration, rep Reporter) (string, []byte, int64, error) {
 	if idle <= 0 {
 		idle = defaultTransferIdleTO
@@ -937,6 +948,7 @@ func pickLocalIPv4() net.IP {
 	return udp.IP.To4()
 }
 
+// ensureFreeSpace checks that the target directory has at least the required bytes.
 func ensureFreeSpace(dir string, needed uint64) error {
 	avail, err := diskFreeBytes(dir)
 	if err != nil {
@@ -955,6 +967,8 @@ func transportLabelForCandidate(cand rendezvous.Candidate) string {
 	return "p2p"
 }
 
+// deriveSAS produces a short authentication string for human verification, mixing the
+// Noise transcript with the PAKE-derived key.
 func deriveSAS(transcript []byte, psk []byte) string {
 	sum := blake3.Sum256(append(transcript, psk...))
 	lo := binary.BigEndian.Uint16(sum[0:2]) % 10000
