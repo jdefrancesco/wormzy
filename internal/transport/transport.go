@@ -367,24 +367,24 @@ func DefaultRelay() string {
 func rendezvousExchange(ctx context.Context, cfg Config, me rendezvous.SelfInfo, rep Reporter, mb mailbox) (peer rendezvous.SelfInfo, assigned string, psk []byte, err error) {
 	code, err := mb.Claim(ctx, cfg.Code)
 	if err != nil {
-		return peer, assigned, nil, err
+		return peer, assigned, nil, friendlyRendezvousErr(err)
 	}
 	assigned = code
 	rep.Stage(StageRendezvous, StageStateRunning, "code "+assigned)
 	rep.Logf("rendezvous assigned code %s", assigned)
 
 	if err := mb.StoreSelf(ctx, me); err != nil {
-		return peer, assigned, nil, err
+		return peer, assigned, nil, friendlyRendezvousErr(err)
 	}
 
 	psk, err = runPAKEOverMailbox(ctx, mb, cfg.Mode, assigned, "send", "recv")
 	if err != nil {
-		return peer, assigned, nil, err
+		return peer, assigned, nil, friendlyRendezvousErr(err)
 	}
 
 	peerInfo, err := mb.WaitPeer(ctx)
 	if err != nil {
-		return peer, assigned, nil, err
+		return peer, assigned, nil, friendlyRendezvousErr(err)
 	}
 	return *peerInfo, assigned, psk, nil
 }
@@ -397,11 +397,11 @@ func runPAKEOverMailbox(ctx context.Context, mb mailbox, role, code, idA, idB st
 			return nil, err
 		}
 		if err := mb.Send(ctx, "pake1", msgA); err != nil {
-			return nil, err
+			return nil, friendlyRendezvousErr(err)
 		}
 		m, err := mb.Receive(ctx)
 		if err != nil {
-			return nil, err
+			return nil, friendlyRendezvousErr(err)
 		}
 		if m.Type != "pake1" {
 			return nil, fmt.Errorf("expected pake1, got %s", m.Type)
@@ -436,16 +436,30 @@ func runPAKEOverMailbox(ctx context.Context, mb mailbox, role, code, idA, idB st
 		return nil, err
 	}
 	if err := mb.Send(ctx, "pake1", msgB); err != nil {
-		return nil, err
+		return nil, friendlyRendezvousErr(err)
 	}
 	resp, err := mb.Receive(ctx)
 	if err != nil {
-		return nil, err
+		return nil, friendlyRendezvousErr(err)
 	}
 	if resp.Type != "pake2" {
 		return nil, fmt.Errorf("expected pake2, got %s", resp.Type)
 	}
 	return keyB, nil
+}
+
+func friendlyRendezvousErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, errSenderMissing):
+		return fmt.Errorf("code not found (did the sender start a fresh session?)")
+	case errors.Is(err, errSessionNotFound):
+		return fmt.Errorf("code not found or expired; ask the sender for a new code")
+	default:
+		return err
+	}
 }
 
 func runNoiseOverQUIC(conn *quic.Conn, initiator bool, psk []byte) ([]byte, string, error) {

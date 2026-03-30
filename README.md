@@ -9,6 +9,12 @@ include:
 * Communication is secure/encrypted
 * Utilizes QUIC for fast transfers.
 
+## Why Wormzy
+- No setup for users: baked-in relay `https://relay.wormzy.io` works out of the box; overrides stay opt-in.
+- P2P-first: prioritizes direct UDP/QUIC; relays only as a fallback.
+- Human-friendly pairing codes and auto file collision handling (`example (wormzy-1).txt`).
+- Integrity and privacy: Noise + QUIC with SAS, disk-space preflight, and hash verification.
+- Cross-platform CLI with Bubble Tea UI plus headless mode for scripts/CI.
 
 ## Quick Start
 
@@ -61,15 +67,9 @@ The CLI ships with a baked-in relay (`https://relay.wormzy.io`). You don’t nee
 
 ## Screenshots
 
-Add screenshots (or a short screencast thumbnail) under `docs/screenshots/` and link them here.
-
-<!-- Example:
-![Wormzy send](docs/screenshots/wormzy-session.png)
--->
-
-## Security Policy
-
-TBD
+Add your captures under `docs/screenshots/`:
+- ![Wormzy send](docs/screenshots/wormzy-send.png)
+- ![Wormzy receive](docs/screenshots/wormzy-receive.png)
 
 ## Reporting a Vulnerability
 
