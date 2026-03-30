@@ -1,0 +1,4 @@
+# TODO
+
+* Set WORMZY default relay URL
+* Investigate localhost connection on port 6379
