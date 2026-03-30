@@ -4,7 +4,7 @@ import (
 	"errors"
 	"net"
 
-	"github.com/jdefrancesco/internal/rendezvous"
+	"github.com/jdefrancesco/wormzy/internal/rendezvous"
 )
 
 const (

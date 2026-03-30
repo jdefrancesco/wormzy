@@ -11,7 +11,7 @@ import (
 	"path"
 	"time"
 
-	"github.com/jdefrancesco/internal/rendezvous"
+	"github.com/jdefrancesco/wormzy/internal/rendezvous"
 )
 
 type httpMailbox struct {

@@ -5,7 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jdefrancesco/internal/transport"
+	"github.com/jdefrancesco/wormzy/internal/transport"
 )
 
 // Reporter dispatches transport updates into the Bubble Tea program.

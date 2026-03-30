@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/jdefrancesco/internal/stun"
+	"github.com/jdefrancesco/wormzy/internal/stun"
 )
 
 func main() {

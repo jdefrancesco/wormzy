@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jdefrancesco/internal/transport"
+	"github.com/jdefrancesco/wormzy/internal/transport"
 )
 
 func main() {

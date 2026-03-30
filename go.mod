@@ -1,4 +1,4 @@
-module github.com/jdefrancesco
+module github.com/jdefrancesco/wormzy
 
 go 1.25.0
 

@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jdefrancesco/internal/rendezvous"
+	"github.com/jdefrancesco/wormzy/internal/rendezvous"
 	"github.com/redis/go-redis/v9"
 )
 

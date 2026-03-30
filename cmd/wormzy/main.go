@@ -27,8 +27,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-isatty"
 
-	"github.com/jdefrancesco/internal/transport"
-	"github.com/jdefrancesco/internal/ui"
+	"github.com/jdefrancesco/wormzy/internal/transport"
+	"github.com/jdefrancesco/wormzy/internal/ui"
 )
 
 const version = "0.1.2-dev"

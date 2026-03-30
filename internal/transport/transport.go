@@ -29,8 +29,8 @@ import (
 
 	cpace "filippo.io/cpace"
 	"github.com/flynn/noise"
-	"github.com/jdefrancesco/internal/rendezvous"
-	"github.com/jdefrancesco/internal/stun"
+	"github.com/jdefrancesco/wormzy/internal/rendezvous"
+	"github.com/jdefrancesco/wormzy/internal/stun"
 	"github.com/quic-go/quic-go"
 	"github.com/zeebo/blake3"
 	"golang.org/x/crypto/chacha20poly1305"

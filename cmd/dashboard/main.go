@@ -11,7 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jdefrancesco/internal/transport"
+	"github.com/jdefrancesco/wormzy/internal/transport"
 )
 
 func main() {

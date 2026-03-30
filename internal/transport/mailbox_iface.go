@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/jdefrancesco/internal/rendezvous"
+	"github.com/jdefrancesco/wormzy/internal/rendezvous"
 )
 
 type mailbox interface {

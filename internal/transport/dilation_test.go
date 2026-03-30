@@ -3,7 +3,7 @@ package transport
 import (
 	"testing"
 
-	"github.com/jdefrancesco/internal/rendezvous"
+	"github.com/jdefrancesco/wormzy/internal/rendezvous"
 )
 
 func TestSelectPeerCandidatePrefersLocalWhenSamePublic(t *testing.T) {
