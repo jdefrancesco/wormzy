@@ -38,8 +38,10 @@ import (
 )
 
 const (
-	alpn                  = "p2p-wormzy-1"
-	defaultRelay          = "127.0.0.1:6379"
+	alpn = "p2p-wormzy-1"
+	// defaultRelay is the baked-in rendezvous/mailbox endpoint. Users can override
+	// via CLI flag or environment (WORMZY_RELAY_URL / WORMZY_RELAY).
+	defaultRelay          = "https://relay.wormzy.io"
 	defaultHandshakeTO    = 90 * time.Second
 	defaultTransferIdleTO = 5 * time.Minute
 

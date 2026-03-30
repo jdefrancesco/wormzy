@@ -55,6 +55,10 @@ Large transfers run with per-stream idle timeouts; stalled sessions abort instea
 
 On a server with the systemd units installed, run `make deploy`. It builds the binaries, installs them to `/usr/local/bin`, reloads systemd, and restarts `wormzy-mailbox` and `wormzy-rendezvous` (ignored if those services are absent).
 
+## Relay defaults
+
+The CLI ships with a baked-in relay (`https://relay.wormzy.io`). You don’t need to set anything for basic use. To override, pass `-relay ...` or set `WORMZY_RELAY_URL`. A config file at `$XDG_CONFIG_HOME/wormzy/relay` or `/etc/wormzy/relay` is also honored.
+
 ## Screenshots
 
 Add screenshots (or a short screencast thumbnail) under `docs/screenshots/` and link them here.

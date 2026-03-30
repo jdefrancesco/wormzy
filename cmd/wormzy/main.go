@@ -539,7 +539,32 @@ func resolveRelay(flagValue string) string {
 	if env := os.Getenv("WORMZY_RELAY"); env != "" {
 		return env
 	}
+	if cfg, ok := relayFromConfig(); ok {
+		return cfg
+	}
 	return transport.DefaultRelay()
+}
+
+// relayFromConfig reads an optional relay override from config files.
+func relayFromConfig() (string, bool) {
+	paths := []string{
+		filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "wormzy", "relay"),
+		filepath.Join(os.Getenv("HOME"), ".config", "wormzy", "relay"),
+		"/etc/wormzy/relay",
+	}
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if v := strings.TrimSpace(string(data)); v != "" {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 func ensureDownloadDir(path string) error {
