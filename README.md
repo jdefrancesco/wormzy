@@ -19,6 +19,14 @@ It's primary features include:
 - Integrity and privacy: Noise + QUIC with SAS, disk-space preflight, and hash verification.
 - Cross-platform CLI with a beautiful TUI! Plus headless mode for scripts/CI *(in progress)*.
 
+## Wormzy vs. Magic Wormhole
+
+- Transport: QUIC + Noise with NAT punching; Magic Wormhole uses TCP + PAKE with relay streams.
+- Defaults: Baked-in HTTPS relay and STUN list; Magic Wormhole typically needs a relay URL or uses the Python community relay.
+- UX: Bubble Tea TUI with headless fallback; Magic Wormhole is plain CLI.
+- File safety: Collision-safe saves (`name (wormzy-1).txt`) and disk-space preflight; Magic Wormhole overwrites unless redirected.
+- Metrics: Built-in dashboard over Redis showing P2P vs relay; Magic Wormhole doesn’t expose relay/session metrics.
+
 ## Quick Start
 
 Install the `wormzy` CLI:
@@ -76,8 +84,12 @@ The CLI ships with a baked-in relay (`https://relay.wormzy.io`). You don’t nee
 
 ## Reporting a Vulnerability
 
-Please email jdefr89@gmail.com.
+Please email: jdefr89@gmail.com.
 
 ## Data/Model Use Notice
 
 The code, text, and assets in this repository may not be used to train, fine-tune, or improve large language models or other generative AI systems without explicit written permission from the project owner.
+
+## AI/LLM Usage
+
+This project is one of my first that makes serious uses of GenAI/LLM. **However**, blind agent coding did not take place! I personally step through any generated code for quality assurance. I don't like the idea of offloading security practices to AI agents (at least not yet..). If anyone wishes to contribute, use AI sparingly and do not commit any code you haven't reviewed to some extent.
