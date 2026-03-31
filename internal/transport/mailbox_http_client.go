@@ -137,21 +137,25 @@ func (m *httpMailbox) Close() error { return nil }
 
 func (m *httpMailbox) ReportStats(ctx context.Context, stats transferStats) error {
 	req := struct {
-		Role      string `json:"role"`
-		Code      string `json:"code"`
-		Mode      string `json:"mode"`
-		Transport string `json:"transport"`
-		Candidate string `json:"candidate"`
-		Completed bool   `json:"completed"`
-		Error     string `json:"error,omitempty"`
+		Role          string `json:"role"`
+		Code          string `json:"code"`
+		Mode          string `json:"mode"`
+		Transport     string `json:"transport"`
+		Candidate     string `json:"candidate"`
+		DirectOutcome string `json:"direct_outcome,omitempty"`
+		DirectSummary string `json:"direct_summary,omitempty"`
+		Completed     bool   `json:"completed"`
+		Error         string `json:"error,omitempty"`
 	}{
-		Role:      m.role,
-		Code:      m.code,
-		Mode:      stats.Mode,
-		Transport: stats.Transport,
-		Candidate: stats.Candidate,
-		Completed: stats.Completed,
-		Error:     stats.Error,
+		Role:          m.role,
+		Code:          m.code,
+		Mode:          stats.Mode,
+		Transport:     stats.Transport,
+		Candidate:     stats.Candidate,
+		DirectOutcome: stats.DirectOutcome,
+		DirectSummary: stats.DirectSummary,
+		Completed:     stats.Completed,
+		Error:         stats.Error,
 	}
 	return m.doJSON(ctx, http.MethodPost, "/v1/stats", req, nil)
 }

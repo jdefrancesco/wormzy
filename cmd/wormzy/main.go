@@ -316,7 +316,7 @@ func parseInfo(args []string) (options, error) {
 	opt := options{Mode: "info"}
 	fs := flag.NewFlagSet("info", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&opt.Relay, "relay", "", "override relay URL/address to check")
+	fs.StringVar(&opt.Relay, "relay", "", "override mailbox/rendezvous endpoint to check")
 	fs.Usage = printInfoUsage
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -334,7 +334,7 @@ func parseInfo(args []string) (options, error) {
 }
 
 func registerSharedFlags(fs *flag.FlagSet, opt *options) {
-	fs.StringVar(&opt.Relay, "relay", "", "redis address/URL for rendezvous (defaults to WORMZY_RELAY_URL or 127.0.0.1:6379)")
+	fs.StringVar(&opt.Relay, "relay", "", "mailbox/rendezvous endpoint (defaults to WORMZY_RELAY_URL; legacy redis:// supported)")
 	fs.StringVar(&opt.RelayPin, "relay-pin", "", "base64(SHA256(SPKI)) pin for rendezvous TLS")
 	fs.DurationVar(&opt.Timeout, "timeout", 90*time.Second, "handshake timeout before giving up on pairing")
 	fs.DurationVar(&opt.IdleTimeout, "idle-timeout", 5*time.Minute, "max idle time after pairing before aborting a stalled transfer")
@@ -372,7 +372,7 @@ func printRecvUsage() {
 }
 
 func printSharedFlags() {
-	fmt.Println(formatFlagLine("--relay", "redis address/URL for rendezvous (defaults to env WORMZY_RELAY_URL)"))
+	fmt.Println(formatFlagLine("--relay", "mailbox/rendezvous endpoint (defaults to env WORMZY_RELAY_URL)"))
 	fmt.Println(formatFlagLine("--relay-pin", "base64(SHA256(SPKI)) pin for rendezvous TLS"))
 	fmt.Println(formatFlagLine("--timeout", "handshake timeout before giving up on pairing (default 1m30s)"))
 	fmt.Println(formatFlagLine("--idle-timeout", "max idle time after pairing before aborting (default 5m0s)"))
@@ -383,10 +383,10 @@ func printSharedFlags() {
 
 func printInfoUsage() {
 	fmt.Println(usageHeadingStyle.Render("wormzy info"))
-	fmt.Println(usageDescStyle.Render("Check which relay will be used and whether it is reachable."))
+	fmt.Println(usageDescStyle.Render("Check which mailbox/rendezvous endpoint will be used and whether it is reachable."))
 	fmt.Println()
 	fmt.Println(usageHeadingStyle.Render("Flags"))
-	fmt.Println(formatFlagLine("--relay", "override relay URL/address to probe"))
+	fmt.Println(formatFlagLine("--relay", "override mailbox/rendezvous endpoint to probe"))
 }
 
 func formatFlagLine(name, desc string) string {
@@ -395,12 +395,12 @@ func formatFlagLine(name, desc string) string {
 
 func runInfo(opt options) error {
 	relay := resolveRelay(opt.Relay)
-	fmt.Println(usageHeadingStyle.Render("Relay probe"))
+	fmt.Println(usageHeadingStyle.Render("Mailbox probe"))
 	env := os.Getenv("WORMZY_RELAY_URL")
 	if env == "" {
 		env = "(not set)"
 	}
-	fmt.Println(formatFlagLine("Resolved relay", relay))
+	fmt.Println(formatFlagLine("Resolved mailbox", relay))
 	fmt.Println(formatFlagLine("WORMZY_RELAY_URL", env))
 	if err := probeRelay(relay); err != nil {
 		fmt.Println(formatFlagLine("Status", fmt.Sprintf("unreachable (%v)", err)))
@@ -544,7 +544,7 @@ func promptForCode() (string, error) {
 	return strings.TrimSpace(code), nil
 }
 
-// resolveRelay determines the rendezvous relay address.
+// resolveRelay determines the mailbox/rendezvous endpoint.
 func resolveRelay(flagValue string) string {
 	if flagValue != "" {
 		return flagValue

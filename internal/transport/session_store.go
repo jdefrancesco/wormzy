@@ -54,14 +54,16 @@ type msgPt struct {
 }
 
 type transferStats struct {
-	Mode          string `json:"mode,omitempty"`
-	Transport     string `json:"transport,omitempty"`
-	Candidate     string `json:"candidate,omitempty"`
-	Bytes         int64  `json:"bytes,omitempty"`
-	DurationMillis int64 `json:"duration_ms,omitempty"`
-	Completed     bool   `json:"completed"`
-	Error         string `json:"error,omitempty"`
-	UpdatedUnix   int64  `json:"updated_unix"`
+	Mode           string `json:"mode,omitempty"`
+	Transport      string `json:"transport,omitempty"`
+	Candidate      string `json:"candidate,omitempty"`
+	DirectOutcome  string `json:"direct_outcome,omitempty"`
+	DirectSummary  string `json:"direct_summary,omitempty"`
+	Bytes          int64  `json:"bytes,omitempty"`
+	DurationMillis int64  `json:"duration_ms,omitempty"`
+	Completed      bool   `json:"completed"`
+	Error          string `json:"error,omitempty"`
+	UpdatedUnix    int64  `json:"updated_unix"`
 }
 
 func newSessionStore(client *redis.Client, ttl time.Duration, prefix string) *sessionStore {

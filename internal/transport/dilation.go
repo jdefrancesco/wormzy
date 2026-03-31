@@ -3,6 +3,7 @@ package transport
 import (
 	"errors"
 	"net"
+	"sort"
 	"strings"
 
 	"github.com/jdefrancesco/wormzy/internal/rendezvous"
@@ -44,23 +45,34 @@ func buildCandidates(self rendezvous.SelfInfo, loopback bool, relayAddr string) 
 	return out
 }
 
-func selectPeerCandidate(self, peer rendezvous.SelfInfo, loopback bool) (rendezvous.Candidate, *rendezvous.Candidate, error) {
+func selectPeerCandidates(self, peer rendezvous.SelfInfo, loopback bool) ([]rendezvous.Candidate, *rendezvous.Candidate, error) {
 	if loopback && peer.Local != "" {
-		return rendezvous.Candidate{
+		return []rendezvous.Candidate{{
 			Type:     "loopback",
 			Proto:    "udp",
 			Addr:     peer.Local,
 			Priority: 120,
-		}, nil, nil
+		}}, nil, nil
 	}
 
 	preferLocal := loopback || samePublicIP(self.Public, peer.Public)
 
 	var (
-		best      *rendezvous.Candidate
-		bestLocal *rendezvous.Candidate
 		relayCand *rendezvous.Candidate
+		direct    []rendezvous.Candidate
 	)
+	seen := make(map[string]bool)
+	addDirect := func(cand rendezvous.Candidate) {
+		if cand.Proto != "udp" || cand.Addr == "" {
+			return
+		}
+		key := cand.Proto + "|" + cand.Addr
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		direct = append(direct, cand)
+	}
 	for _, cand := range peer.Candidates {
 		if cand.Proto != "udp" {
 			continue
@@ -70,44 +82,100 @@ func selectPeerCandidate(self, peer rendezvous.SelfInfo, loopback bool) (rendezv
 			if relayCand == nil {
 				relayCand = &cand
 			}
-			// Never pick relay as best unless no other options.
 			continue
 		}
-		if cand.Type == "local" && preferLocal {
-			if bestLocal == nil || cand.Priority > bestLocal.Priority {
-				bestLocal = &cand
-			}
-		}
-		if best == nil || cand.Priority > best.Priority {
-			best = &cand
-		}
+		addDirect(cand)
 	}
-	if preferLocal && bestLocal != nil {
-		return *bestLocal, relayCand, nil
-	}
-	if best != nil {
-		return *best, relayCand, nil
-	}
-	if relayCand != nil {
-		return *relayCand, relayCand, nil
-	}
-	if peer.Public != "" && !preferLocal {
-		return rendezvous.Candidate{
+	if !preferLocal && peer.Public != "" {
+		addDirect(rendezvous.Candidate{
 			Type:     "legacy-public",
 			Proto:    "udp",
 			Addr:     peer.Public,
 			Priority: 10,
-		}, relayCand, nil
+		})
 	}
 	if peer.Local != "" {
-		return rendezvous.Candidate{
+		addDirect(rendezvous.Candidate{
 			Type:     "legacy-local",
 			Proto:    "udp",
 			Addr:     peer.Local,
 			Priority: 5,
-		}, relayCand, nil
+		})
 	}
-	return rendezvous.Candidate{}, relayCand, errors.New("peer did not advertise any UDP candidates")
+
+	sort.SliceStable(direct, func(i, j int) bool {
+		li := candidateRaceWeight(direct[i], preferLocal)
+		lj := candidateRaceWeight(direct[j], preferLocal)
+		if li == lj {
+			return direct[i].Priority > direct[j].Priority
+		}
+		return li > lj
+	})
+
+	if len(direct) > 0 {
+		return direct, relayCand, nil
+	}
+	if relayCand != nil {
+		return nil, relayCand, nil
+	}
+	return nil, relayCand, errors.New("peer did not advertise any UDP candidates")
+}
+
+func candidateRaceWeight(cand rendezvous.Candidate, preferLocal bool) int {
+	score := cand.Priority
+	switch strings.ToLower(cand.Type) {
+	case "local":
+		if preferLocal {
+			score += 1000
+		}
+	case "reflexive":
+		if !preferLocal {
+			score += 900
+		}
+	}
+	return score
+}
+
+func classifyCandidateByRemote(remote net.Addr, candidates []rendezvous.Candidate) *rendezvous.Candidate {
+	if remote == nil {
+		return nil
+	}
+	remoteHost, remotePort, err := net.SplitHostPort(remote.String())
+	if err != nil {
+		return nil
+	}
+	for i := range candidates {
+		host, port, err := net.SplitHostPort(candidates[i].Addr)
+		if err != nil {
+			continue
+		}
+		if host == remoteHost && port == remotePort {
+			cand := candidates[i]
+			return &cand
+		}
+	}
+	for i := range candidates {
+		host, _, err := net.SplitHostPort(candidates[i].Addr)
+		if err != nil {
+			continue
+		}
+		if host == remoteHost {
+			cand := candidates[i]
+			return &cand
+		}
+	}
+	return nil
+}
+
+func pickFallbackDirectCandidate(candidates []rendezvous.Candidate) rendezvous.Candidate {
+	if len(candidates) == 0 {
+		return rendezvous.Candidate{
+			Type:     "direct-unknown",
+			Proto:    "udp",
+			Priority: 0,
+		}
+	}
+	return candidates[0]
 }
 
 func samePublicIP(a, b string) bool {

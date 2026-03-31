@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -185,18 +186,34 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		finalErr = err
 		return nil, err
 	}
-	chosen, relayCand, err := selectPeerCandidate(self, peer, cfg.Loopback)
+	directCandidates, relayCand, err := selectPeerCandidates(self, peer, cfg.Loopback)
 	if err != nil {
 		reporter.Stage(StageRendezvous, StageStateError, err.Error())
 		return nil, err
 	}
-	reporter.Stage(StageRendezvous, StageStateDone, fmt.Sprintf("%s (%s)", chosen.Addr, chosen.Type))
+	if len(directCandidates) > 0 {
+		first := directCandidates[0]
+		extra := ""
+		if len(directCandidates) > 1 {
+			extra = fmt.Sprintf(" +%d candidates", len(directCandidates)-1)
+		}
+		reporter.Stage(StageRendezvous, StageStateDone, fmt.Sprintf("%s (%s)%s", first.Addr, first.Type, extra))
+	} else if relayCand != nil {
+		reporter.Stage(StageRendezvous, StageStateDone, fmt.Sprintf("%s (%s)", relayCand.Addr, relayCand.Type))
+	} else {
+		reporter.Stage(StageRendezvous, StageStateError, "no usable transport candidates")
+		return nil, fmt.Errorf("no usable transport candidates")
+	}
 	reporter.Logf("paired with code %s", code)
 
+	initialCandidate := pickFallbackDirectCandidate(directCandidates)
+	if relayCand != nil && len(directCandidates) == 0 {
+		initialCandidate = *relayCand
+	}
 	stats := transferStats{
 		Mode:      cfg.Mode,
-		Candidate: chosen.Type,
-		Transport: transportLabelForCandidate(chosen),
+		Candidate: initialCandidate.Type,
+		Transport: transportLabelForCandidate(initialCandidate),
 	}
 	defer func() {
 		if mbox == nil {
@@ -215,21 +232,38 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		}
 	}()
 
-	peerAddr := chosen.Addr
-	peerUDP, err := net.ResolveUDPAddr("udp4", peerAddr)
-	if err != nil {
-		return nil, err
+	type directTarget struct {
+		cand rendezvous.Candidate
+		addr *net.UDPAddr
+	}
+	var directTargets []directTarget
+	for _, cand := range directCandidates {
+		peerUDP, err := net.ResolveUDPAddr("udp4", cand.Addr)
+		if err != nil {
+			reporter.Logf("direct candidate %s (%s) resolve failed: %v", cand.Addr, cand.Type, err)
+			continue
+		}
+		directTargets = append(directTargets, directTarget{cand: cand, addr: peerUDP})
+	}
+	if len(directTargets) == 0 && relayCand == nil {
+		return nil, fmt.Errorf("peer did not advertise any dialable UDP candidates")
 	}
 
 	punchCtx, cancelPunch := context.WithCancel(ctx)
 	defer cancelPunch()
 	stopPunch := make(chan struct{})
 	var punchWG sync.WaitGroup
-	punchWG.Add(1)
-	go func() {
-		defer punchWG.Done()
-		punchLoop(punchCtx, udpConn, peerUDP, stopPunch)
-	}()
+	if len(directTargets) > 0 {
+		punchTargets := make([]*net.UDPAddr, 0, len(directTargets))
+		for _, target := range directTargets {
+			punchTargets = append(punchTargets, target.addr)
+		}
+		punchWG.Add(1)
+		go func() {
+			defer punchWG.Done()
+			punchLoop(punchCtx, udpConn, punchTargets, stopPunch)
+		}()
+	}
 
 	quicTransport := &quic.Transport{Conn: udpConn}
 	serverTLS, err := selfSignedTLS()
@@ -254,44 +288,82 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 	type quicResult struct {
 		conn      *quic.Conn
 		initiated bool
+		candidate *rendezvous.Candidate
+		attempt   int
 		err       error
 	}
-	resCh := make(chan quicResult, 4)
+	type relayResult struct {
+		conn      *quic.Conn
+		transport *quic.Transport
+		err       error
+	}
+	resCh := make(chan quicResult, len(directTargets)*2+2)
+	relayResCh := make(chan relayResult, 1)
 	ctxConn, cancelConn := context.WithTimeout(ctx, cfg.HandshakeTimeout)
 	defer cancelConn()
 
 	// Accept path
 	go func() {
 		conn, err := ln.Accept(ctxConn)
-		resCh <- quicResult{conn: conn, initiated: false, err: err}
+		resCh <- quicResult{conn: conn, initiated: false, attempt: 0, err: err}
 	}()
 
-	launchDial := func(delay time.Duration) {
+	launchDial := func(target directTarget, delay time.Duration, attempt int) {
 		go func() {
 			if delay > 0 {
-				time.Sleep(delay)
+				timer := time.NewTimer(delay)
+				select {
+				case <-ctxConn.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
 			}
-			conn, err := quicTransport.Dial(ctxConn, peerUDP, clientTLS, quicConf)
-			resCh <- quicResult{conn: conn, initiated: true, err: err}
+			conn, err := quicTransport.Dial(ctxConn, target.addr, clientTLS, quicConf)
+			cand := target.cand
+			resCh <- quicResult{conn: conn, initiated: true, candidate: &cand, attempt: attempt, err: err}
 		}()
 	}
-	if cfg.Mode == "send" {
-		launchDial(200 * time.Millisecond)
-	} else {
-		launchDial(0)
+	if len(directTargets) > 0 {
+		baseDelay := time.Duration(0)
+		if cfg.Mode == "send" {
+			baseDelay = 200 * time.Millisecond
+		}
+		reporter.Logf("starting direct race with %d candidate(s)", len(directTargets))
+		for i, target := range directTargets {
+			launchDial(target, baseDelay+time.Duration(i)*120*time.Millisecond, 1)
+		}
+		for i, target := range directTargets {
+			launchDial(target, baseDelay+700*time.Millisecond+time.Duration(i)*120*time.Millisecond, 2)
+		}
 	}
-	// simultaneous-open retry
-	launchDial(500 * time.Millisecond)
+
+	dialableCandidates := make([]rendezvous.Candidate, 0, len(directTargets))
+	for _, target := range directTargets {
+		dialableCandidates = append(dialableCandidates, target.cand)
+	}
 
 	var quicConn *quic.Conn
 	initiated := cfg.Mode == "recv"
-	usedCandidate := chosen
+	usedCandidate := pickFallbackDirectCandidate(dialableCandidates)
 	var firstErr error
 	relayAttempted := false
+	relayInFlight := false
+	directOutcome := "pending"
+	directStatus := make(map[string]string, len(directTargets))
+	for _, target := range directTargets {
+		directStatus[target.cand.Type+"@"+target.cand.Addr] = "pending"
+	}
 	var relayTransport *quic.Transport
-	fallbackTimer := time.NewTimer(relayFallbackDelay)
+	fallbackDelay := relayFallbackDelay
+	if len(directTargets) == 0 && relayCand != nil {
+		fallbackDelay = 0
+		directOutcome = "no-response"
+	}
+	fallbackTimer := time.NewTimer(fallbackDelay)
 	defer fallbackTimer.Stop()
 
+	// Sloppy NAT punching p2p-race logic goes here. If we miserably fail fallback and just use relay.
 waitLoop:
 	for quicConn == nil {
 		select {
@@ -299,7 +371,29 @@ waitLoop:
 			if res.err == nil && res.conn != nil {
 				quicConn = res.conn
 				initiated = res.initiated
+				if res.initiated && res.candidate != nil {
+					usedCandidate = *res.candidate
+					key := usedCandidate.Type + "@" + usedCandidate.Addr
+					directStatus[key] = "won"
+					directOutcome = "won"
+					reporter.Logf("direct race won on %s (%s) attempt=%d", usedCandidate.Addr, usedCandidate.Type, res.attempt)
+				} else {
+					matched := classifyCandidateByRemote(res.conn.RemoteAddr(), dialableCandidates)
+					if matched != nil {
+						usedCandidate = *matched
+						key := matched.Type + "@" + matched.Addr
+						directStatus[key] = "won"
+					}
+					directOutcome = "won"
+					reporter.Logf("direct race accepted from %s", res.conn.RemoteAddr())
+				}
 				break waitLoop
+			}
+			if res.candidate != nil {
+				key := res.candidate.Type + "@" + res.candidate.Addr
+				outcome := classifyDialError(res.err)
+				directStatus[key] = outcome
+				reporter.Logf("direct race failed on %s (%s) attempt=%d outcome=%s err=%v", res.candidate.Addr, res.candidate.Type, res.attempt, outcome, res.err)
 			}
 			if firstErr == nil {
 				firstErr = res.err
@@ -307,33 +401,69 @@ waitLoop:
 		case <-fallbackTimer.C:
 			if relayCand != nil && !relayAttempted {
 				relayAttempted = true
-				cancelConn()
+				if directOutcome == "pending" {
+					directOutcome = "quic-timeout"
+				}
 				reporter.Logf("falling back to relay %s", relayCand.Addr)
 				reporter.Stage(StageQUIC, StageStateRunning, "relay fallback")
-				relayCtx, cancelRelay := context.WithTimeout(ctx, cfg.HandshakeTimeout)
-				rConn, rTransport, err := dialRelay(relayCtx, relayCand.Addr, cfg)
-				if err == nil {
-					if err := registerRelay(relayCtx, rConn, code, cfg.Mode, psk); err == nil {
-						quicConn = rConn
-						relayTransport = rTransport
-						initiated = cfg.Mode == "send"
-						usedCandidate = *relayCand
-					} else {
-						_ = rConn.CloseWithError(0, err.Error())
+				relayInFlight = true
+				go func() {
+					rConn, rTransport, err := dialRelay(ctxConn, relayCand.Addr, cfg)
+					if err != nil {
+						relayResCh <- relayResult{err: err}
+						return
 					}
+					if err := registerRelay(ctxConn, rConn, code, cfg.Mode, psk); err != nil {
+						_ = rConn.CloseWithError(0, err.Error())
+						relayResCh <- relayResult{err: err}
+						return
+					}
+					relayResCh <- relayResult{conn: rConn, transport: rTransport}
+				}()
+			}
+		case relay := <-relayResCh:
+			relayInFlight = false
+			if relay.err == nil && relay.conn != nil {
+				quicConn = relay.conn
+				relayTransport = relay.transport
+				initiated = cfg.Mode == "send"
+				usedCandidate = *relayCand
+				if len(directTargets) == 0 {
+					directOutcome = "no-response"
 				}
-				cancelRelay()
+				break waitLoop
+			}
+			reporter.Logf("relay fallback attempt failed: %v", relay.err)
+			if firstErr == nil {
+				firstErr = relay.err
 			}
 		case <-ctxConn.Done():
 			if quicConn != nil {
 				break waitLoop
 			}
+			if relayInFlight {
+				relay := <-relayResCh
+				relayInFlight = false
+				if relay.err == nil && relay.conn != nil {
+					quicConn = relay.conn
+					relayTransport = relay.transport
+					initiated = cfg.Mode == "send"
+					usedCandidate = *relayCand
+					break waitLoop
+				}
+				if firstErr == nil {
+					firstErr = relay.err
+				}
+			}
+			if directOutcome == "pending" {
+				if len(directTargets) == 0 {
+					directOutcome = "no-response"
+				} else {
+					directOutcome = "quic-timeout"
+				}
+			}
 			if firstErr == nil {
 				firstErr = ctxConn.Err()
-			}
-			if relayAttempted && relayCand != nil {
-				reporter.Stage(StageQUIC, StageStateError, firstErr.Error())
-				return nil, firstErr
 			}
 			reporter.Stage(StageQUIC, StageStateError, firstErr.Error())
 			return nil, firstErr
@@ -352,6 +482,20 @@ waitLoop:
 
 	stats.Candidate = usedCandidate.Type
 	stats.Transport = transportLabelForCandidate(usedCandidate)
+	if directOutcome == "pending" {
+		if usedCandidate.Type == "relay" {
+			directOutcome = "quic-timeout"
+		} else {
+			directOutcome = "won"
+		}
+	}
+	stats.DirectOutcome = directOutcome
+	stats.DirectSummary = summarizeDirectRace(directStatus)
+	if stats.DirectSummary != "" {
+		reporter.Logf("direct race outcome=%s details=%s", stats.DirectOutcome, stats.DirectSummary)
+	} else {
+		reporter.Logf("direct race outcome=%s", stats.DirectOutcome)
+	}
 
 	close(stopPunch)
 	punchWG.Wait()
@@ -362,8 +506,8 @@ waitLoop:
 	if usedCandidate.Type == "relay" {
 		reporter.Stage(StageQUIC, StageStateDone, "relay fallback")
 	} else if initiated {
-		reporter.Logf("dialed QUIC peer %s", peerUDP)
-		reporter.Stage(StageQUIC, StageStateDone, peerUDP.String())
+		reporter.Logf("dialed QUIC peer %s", usedCandidate.Addr)
+		reporter.Stage(StageQUIC, StageStateDone, usedCandidate.Addr)
 	} else {
 		reporter.Logf("accepted QUIC connection from %s", quicConn.RemoteAddr())
 		reporter.Stage(StageQUIC, StageStateDone, quicConn.RemoteAddr().String())
@@ -372,6 +516,9 @@ waitLoop:
 	reporter.Stage(StageNoise, StageStateRunning, "noise handshake")
 	fileKey, sas, err := runNoiseOverQUIC(quicConn, initiated, psk)
 	if err != nil {
+		if stats.Transport == "p2p" {
+			stats.DirectOutcome = "noise-failed"
+		}
 		reporter.Stage(StageNoise, StageStateError, err.Error())
 		return nil, err
 	}
@@ -1084,6 +1231,39 @@ func transportLabelForCandidate(cand rendezvous.Candidate) string {
 	return "p2p"
 }
 
+func classifyDialError(err error) string {
+	if err == nil {
+		return "won"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "quic-timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "no-response"
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "timeout") {
+		return "quic-timeout"
+	}
+	return "no-response"
+}
+
+func summarizeDirectRace(status map[string]string) string {
+	if len(status) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(status))
+	for key := range status {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+status[key])
+	}
+	return strings.Join(parts, ",")
+}
+
 // deriveSAS produces a short authentication string for human verification, mixing the
 // Noise transcript with the PAKE-derived key.
 func deriveSAS(transcript []byte, psk []byte) string {
@@ -1093,7 +1273,7 @@ func deriveSAS(transcript []byte, psk []byte) string {
 	return fmt.Sprintf("%04d-%04d", hi, lo)
 }
 
-func punchLoop(ctx context.Context, conn *net.UDPConn, peer *net.UDPAddr, stop <-chan struct{}) {
+func punchLoop(ctx context.Context, conn *net.UDPConn, peers []*net.UDPAddr, stop <-chan struct{}) {
 	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
 	msg := []byte("punch")
@@ -1104,7 +1284,12 @@ func punchLoop(ctx context.Context, conn *net.UDPConn, peer *net.UDPAddr, stop <
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, _ = conn.WriteToUDP(msg, peer)
+			for _, peer := range peers {
+				if peer == nil {
+					continue
+				}
+				_, _ = conn.WriteToUDP(msg, peer)
+			}
 		}
 	}
 }

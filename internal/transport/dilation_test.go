@@ -16,15 +16,15 @@ func TestSelectPeerCandidatePrefersLocalWhenSamePublic(t *testing.T) {
 			{Type: "local", Proto: "udp", Addr: "192.168.10.25:7000", Priority: 60},
 		},
 	}
-	cand, relay, err := selectPeerCandidate(self, peer, false)
+	cands, relay, err := selectPeerCandidates(self, peer, false)
 	if err != nil {
-		t.Fatalf("selectPeerCandidate err: %v", err)
+		t.Fatalf("selectPeerCandidates err: %v", err)
 	}
 	if relay != nil {
 		t.Fatalf("unexpected relay candidate: %+v", relay)
 	}
-	if cand.Addr != peer.Local {
-		t.Fatalf("expected local candidate %s, got %s", peer.Local, cand.Addr)
+	if len(cands) == 0 || cands[0].Addr != peer.Local {
+		t.Fatalf("expected local candidate first (%s), got %+v", peer.Local, cands)
 	}
 }
 
@@ -38,15 +38,15 @@ func TestSelectPeerCandidateReflexiveByDefault(t *testing.T) {
 			{Type: "local", Proto: "udp", Addr: "192.168.10.25:7000", Priority: 60},
 		},
 	}
-	cand, relay, err := selectPeerCandidate(self, peer, false)
+	cands, relay, err := selectPeerCandidates(self, peer, false)
 	if err != nil {
-		t.Fatalf("selectPeerCandidate err: %v", err)
+		t.Fatalf("selectPeerCandidates err: %v", err)
 	}
 	if relay != nil {
 		t.Fatalf("unexpected relay candidate: %+v", relay)
 	}
-	if cand.Type != "reflexive" {
-		t.Fatalf("expected reflexive candidate, got %+v", cand)
+	if len(cands) == 0 || cands[0].Type != "reflexive" {
+		t.Fatalf("expected reflexive candidate first, got %+v", cands)
 	}
 }
 
@@ -58,15 +58,15 @@ func TestSelectPeerCandidateLoopback(t *testing.T) {
 			{Type: "local", Proto: "udp", Addr: "127.0.0.1:7000", Priority: 60},
 		},
 	}
-	cand, relay, err := selectPeerCandidate(self, peer, true)
+	cands, relay, err := selectPeerCandidates(self, peer, true)
 	if err != nil {
-		t.Fatalf("selectPeerCandidate err: %v", err)
+		t.Fatalf("selectPeerCandidates err: %v", err)
 	}
 	if relay != nil {
 		t.Fatalf("unexpected relay candidate: %+v", relay)
 	}
-	if cand.Addr != peer.Local {
-		t.Fatalf("expected loopback candidate %s, got %s", peer.Local, cand.Addr)
+	if len(cands) == 0 || cands[0].Addr != peer.Local {
+		t.Fatalf("expected loopback candidate first (%s), got %+v", peer.Local, cands)
 	}
 }
 
@@ -77,11 +77,11 @@ func TestSelectPeerCandidatePicksRelayAsLastResort(t *testing.T) {
 			{Type: "relay", Proto: "udp", Addr: "relay.example.com:3478", Priority: 40},
 		},
 	}
-	cand, relay, err := selectPeerCandidate(self, peer, false)
+	cands, relay, err := selectPeerCandidates(self, peer, false)
 	if err != nil {
-		t.Fatalf("selectPeerCandidate err: %v", err)
+		t.Fatalf("selectPeerCandidates err: %v", err)
 	}
-	if cand.Type != "relay" || relay == nil {
-		t.Fatalf("expected relay candidate fallback, got %+v relay %+v", cand, relay)
+	if len(cands) != 0 || relay == nil || relay.Type != "relay" {
+		t.Fatalf("expected relay-only fallback, got direct %+v relay %+v", cands, relay)
 	}
 }

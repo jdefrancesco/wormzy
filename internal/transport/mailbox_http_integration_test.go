@@ -104,7 +104,14 @@ func TestMailboxHTTPServer_EndToEnd(t *testing.T) {
 	}
 
 	// stats round-trip persisted in Redis
-	stats := transferStats{Mode: "recv", Transport: "p2p", Candidate: "direct", Completed: true}
+	stats := transferStats{
+		Mode:          "recv",
+		Transport:     "p2p",
+		Candidate:     "direct",
+		DirectOutcome: "won",
+		DirectSummary: "reflexive@203.0.113.10:4242=won",
+		Completed:     true,
+	}
 	if err := receiver.ReportStats(ctx, stats); err != nil {
 		t.Fatalf("receiver report stats: %v", err)
 	}
@@ -120,5 +127,8 @@ func TestMailboxHTTPServer_EndToEnd(t *testing.T) {
 	}
 	if sess.Stats == nil || !sess.Stats.Completed || sess.Stats.Transport != "p2p" {
 		t.Fatalf("stats not stored as expected: %+v", sess.Stats)
+	}
+	if sess.Stats.DirectOutcome != "won" {
+		t.Fatalf("direct outcome not stored: %+v", sess.Stats)
 	}
 }

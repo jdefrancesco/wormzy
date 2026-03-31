@@ -13,7 +13,7 @@ It's primary features include:
 
 ## Why Wormzy
 
-- No setup for users: baked-in relay `https://relay.wormzy.io` works out of the box; overrides stay opt-in.
+- No setup for users: baked-in mailbox endpoint `https://relay.wormzy.io` works out of the box; overrides stay opt-in.
 - P2P-first: prioritizes direct UDP/QUIC; relays only as a fallback.
 - Human-friendly pairing codes and auto file collision handling (`example (wormzy-1).txt`).
 - Integrity and privacy: Noise + QUIC with SAS, disk-space preflight, and hash verification.
@@ -22,7 +22,7 @@ It's primary features include:
 ## Wormzy vs. Magic Wormhole
 
 - Transport: QUIC + Noise with NAT punching; Magic Wormhole uses TCP + PAKE with relay streams.
-- Defaults: Baked-in HTTPS relay and STUN list; Magic Wormhole typically needs a relay URL or uses the Python community relay.
+- Defaults: Baked-in HTTPS mailbox endpoint, STUN list, and optional QUIC relay fallback; Magic Wormhole typically needs a relay URL or uses the Python community relay.
 - UX: Bubble Tea TUI with headless fallback; Magic Wormhole is plain CLI.
 - File safety: Collision-safe saves (`name (wormzy-1).txt`) and disk-space preflight; Magic Wormhole overwrites unless redirected.
 - Metrics: Built-in dashboard over Redis showing P2P vs relay; Magic Wormhole doesn’t expose relay/session metrics.
@@ -71,11 +71,15 @@ Large transfers run with per-stream idle timeouts; stalled sessions abort instea
 
 ## Deploying updated binaries
 
-On a server with the `systemd` units installed, run `make deploy`. It builds the binaries, installs them to `/usr/local/bin`, reloads systemd, and restarts `wormzy-mailbox` and `wormzy-rendezvous` (ignored if those services are absent).
+On a server with the `systemd` units installed, run `make deploy`. It builds the binaries, installs them to `/usr/local/bin`, reloads systemd, and restarts `wormzy-mailbox`, `wormzy-rendezvous`, and `wormzy-relay` (ignored if those services are absent).
 
-## Relay defaults
+## Endpoint defaults
 
-The CLI ships with a baked-in relay (`https://relay.wormzy.io`). You don’t need to set anything for basic use. To override, pass `-relay ...` or set `WORMZY_RELAY_URL`. A config file at `$XDG_CONFIG_HOME/wormzy/relay` or `/etc/wormzy/relay` is also honored.
+The CLI ships with a baked-in mailbox/rendezvous endpoint (`https://relay.wormzy.io`). You don’t need to set anything for basic use. To override, pass `-relay ...` or set `WORMZY_RELAY_URL`. A config file at `$XDG_CONFIG_HOME/wormzy/relay` or `/etc/wormzy/relay` is also honored.
+
+Wormzy transport paths are:
+- direct: UDP/QUIC NAT punching (preferred)
+- relay fallback: QUIC relay on UDP/3478 (only if direct race fails)
 
 ## Screenshots
 

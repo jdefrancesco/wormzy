@@ -167,13 +167,15 @@ func (s *MailboxHTTPServer) handleReceive(w http.ResponseWriter, r *http.Request
 
 func (s *MailboxHTTPServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Role      string `json:"role"`
-		Code      string `json:"code"`
-		Mode      string `json:"mode"`
-		Transport string `json:"transport"`
-		Candidate string `json:"candidate"`
-		Completed bool   `json:"completed"`
-		Error     string `json:"error,omitempty"`
+		Role          string `json:"role"`
+		Code          string `json:"code"`
+		Mode          string `json:"mode"`
+		Transport     string `json:"transport"`
+		Candidate     string `json:"candidate"`
+		DirectOutcome string `json:"direct_outcome,omitempty"`
+		DirectSummary string `json:"direct_summary,omitempty"`
+		Completed     bool   `json:"completed"`
+		Error         string `json:"error,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeHTTPError(w, http.StatusBadRequest, err)
@@ -181,11 +183,13 @@ func (s *MailboxHTTPServer) handleStats(w http.ResponseWriter, r *http.Request) 
 	}
 	mb := s.newMailbox(req.Role, req.Code)
 	stats := transferStats{
-		Mode:      req.Mode,
-		Transport: req.Transport,
-		Candidate: req.Candidate,
-		Completed: req.Completed,
-		Error:     req.Error,
+		Mode:          req.Mode,
+		Transport:     req.Transport,
+		Candidate:     req.Candidate,
+		DirectOutcome: req.DirectOutcome,
+		DirectSummary: req.DirectSummary,
+		Completed:     req.Completed,
+		Error:         req.Error,
 	}
 	if err := mb.ReportStats(r.Context(), stats); err != nil {
 		writeHTTPError(w, http.StatusBadRequest, err)

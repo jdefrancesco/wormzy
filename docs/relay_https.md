@@ -1,9 +1,14 @@
-## HTTPS reverse proxy for the Wormzy mailbox
+## HTTPS reverse proxy for the Wormzy mailbox (control plane)
 
-The `cmd/mailbox` binary is a thin HTTP façade in front of Redis. It does not
-handle TLS itself; instead, run it on `127.0.0.1` and place a reverse proxy
-such as [Caddy](https://caddyserver.com/) in front. This keeps the Go service
-simple while letting the proxy manage certificates and automatic renewals.
+The `cmd/mailbox` binary is a thin HTTP façade in front of Redis for rendezvous,
+pairing, and stats. It does not handle TLS itself; instead, run it on
+`127.0.0.1` and place a reverse proxy such as [Caddy](https://caddyserver.com/)
+in front. This keeps the Go service simple while letting the proxy manage
+certificates and automatic renewals.
+
+The file data path is separate:
+- direct path: UDP/QUIC peer-to-peer
+- fallback path: `cmd/relay` on UDP/3478 forwarding encrypted QUIC streams
 
 ### 1. Bind the mailbox locally
 
@@ -33,16 +38,16 @@ mailbox.example.com {
 
 Reload Caddy (`sudo systemctl reload caddy`). Caddy issues/renews Let's Encrypt
 certificates automatically, so `wormzy` clients can use
-`https://mailbox.example.com` as their relay.
+`https://mailbox.example.com` as their mailbox endpoint.
 
 ### 3. Health checks
 
-`cmd/wormzy info` now probes the relay by requesting `/healthz`. The mailbox
+`cmd/wormzy info` probes the mailbox endpoint by requesting `/healthz`. The mailbox
 HTTP server exposes this endpoint and simply proxies a Redis `PING`, so you can
 also point external monitoring at `https://mailbox.example.com/healthz`.
 
 ### 4. Point clients at HTTPS
 
 Set `WORMZY_RELAY_URL=https://mailbox.example.com` on client hosts (or bake it
-into your environment). They will continue to fall back to peer-to-peer
-transfers, but rendezvous and relay fallback now speak HTTPS over the proxy.
+into your environment). Direct transfers still use UDP/QUIC. If direct race
+fails, clients can use the QUIC relay fallback (`cmd/relay`) on UDP/3478.

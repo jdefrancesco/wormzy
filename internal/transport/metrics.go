@@ -43,21 +43,23 @@ type RelayMetrics struct {
 
 // SessionSnapshot summarizes a single rendezvous session for dashboards.
 type SessionSnapshot struct {
-	Code         string
-	Mode         string
-	State        string
-	Transport    string
-	Candidate    string
-	Bytes        int64
-	Duration     time.Duration
-	Completed    bool
-	Error        string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	ExpiresAt    time.Time
-	TTLRemaining time.Duration
-	HasSender    bool
-	HasReceiver  bool
+	Code          string
+	Mode          string
+	State         string
+	Transport     string
+	Candidate     string
+	DirectOutcome string
+	DirectSummary string
+	Bytes         int64
+	Duration      time.Duration
+	Completed     bool
+	Error         string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	ExpiresAt     time.Time
+	TTLRemaining  time.Duration
+	HasSender     bool
+	HasReceiver   bool
 }
 
 // NewMetricsCollector connects to redisURL and prepares to scan the given prefix.
@@ -201,6 +203,8 @@ func snapshotFromSession(sess *rendezvousSession, now time.Time) SessionSnapshot
 		snap.Mode = sess.Stats.Mode
 		snap.Transport = sess.Stats.Transport
 		snap.Candidate = sess.Stats.Candidate
+		snap.DirectOutcome = sess.Stats.DirectOutcome
+		snap.DirectSummary = sess.Stats.DirectSummary
 		snap.Bytes = sess.Stats.Bytes
 		snap.Duration = time.Duration(sess.Stats.DurationMillis) * time.Millisecond
 		snap.Completed = sess.Stats.Completed
