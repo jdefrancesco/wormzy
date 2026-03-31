@@ -13,7 +13,11 @@ BINARIES := wormzy rendezvous stuncheck mailbox dashboard relay
 
 all: test build 
 
-deploy: build install
+deploy: build
+	-@sudo systemctl stop wormzy-mailbox.service
+	-@sudo systemctl stop wormzy-rendezvous.service
+	-@sudo systemctl stop wormzy-relay.service
+	@$(MAKE) install
 	-@sudo systemctl daemon-reload
 	-@sudo systemctl restart wormzy-mailbox.service
 	-@sudo systemctl restart wormzy-rendezvous.service
@@ -49,7 +53,8 @@ test-all: test-core test-transport test-stun
 .PHONY: install
 install:
 	@for bin in $(BINARIES); do \
-		cp ./$$bin /usr/local/bin/$$bin ; \
+		tmp="/usr/local/bin/.$$bin.tmp" ; \
+		cp ./$$bin "$$tmp" && chmod 0755 "$$tmp" && mv "$$tmp" /usr/local/bin/$$bin ; \
 	done
 
 
