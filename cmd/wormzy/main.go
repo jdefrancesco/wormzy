@@ -1,4 +1,4 @@
-//	Wormzy is a super easy. hassle free secure tool for sending and receiving.
+//	Wormzy is a super easy. hassle free secure tool for sending and receiving files of any size!
 //
 // This is the main entry point for the CLI/TUI application.
 // If you want to know how wormzy works in detail, please refer to the documentation.
@@ -259,10 +259,8 @@ func parseSend(args []string) (options, error) {
 
 	if err := fs.Parse(filtered); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			printSendUsage()
 			return options{}, errShowHelp
 		}
-		printSendUsage()
 		return options{}, err
 	}
 	rest := fs.Args()
@@ -294,10 +292,8 @@ func parseRecv(args []string) (options, error) {
 	fs.Usage = printRecvUsage
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			printRecvUsage()
 			return options{}, errShowHelp
 		}
-		printRecvUsage()
 		return options{}, err
 	}
 	rest := fs.Args()
@@ -320,10 +316,8 @@ func parseInfo(args []string) (options, error) {
 	fs.Usage = printInfoUsage
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			printInfoUsage()
 			return options{}, errShowHelp
 		}
-		printInfoUsage()
 		return options{}, err
 	}
 	if extra := fs.Args(); len(extra) > 0 {
