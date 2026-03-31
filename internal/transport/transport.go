@@ -258,6 +258,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 	}
 	resCh := make(chan quicResult, 4)
 	ctxConn, cancelConn := context.WithTimeout(ctx, cfg.HandshakeTimeout)
+	defer cancelConn()
 
 	// Accept path
 	go func() {
@@ -306,8 +307,6 @@ waitLoop:
 		case <-fallbackTimer.C:
 			if relayCand != nil && !relayAttempted {
 				relayAttempted = true
-				close(stopPunch)
-				punchWG.Wait()
 				cancelConn()
 				reporter.Logf("falling back to relay %s", relayCand.Addr)
 				reporter.Stage(StageQUIC, StageStateRunning, "relay fallback")
@@ -333,8 +332,8 @@ waitLoop:
 				firstErr = ctxConn.Err()
 			}
 			if relayAttempted && relayCand != nil {
-				// keep waiting until relay attempt finishes
-				continue
+				reporter.Stage(StageQUIC, StageStateError, firstErr.Error())
+				return nil, firstErr
 			}
 			reporter.Stage(StageQUIC, StageStateError, firstErr.Error())
 			return nil, firstErr
@@ -354,10 +353,8 @@ waitLoop:
 	stats.Candidate = usedCandidate.Type
 	stats.Transport = transportLabelForCandidate(usedCandidate)
 
-	if usedCandidate.Type != "relay" {
-		close(stopPunch)
-		punchWG.Wait()
-	}
+	close(stopPunch)
+	punchWG.Wait()
 	if relayTransport != nil && relayTransport.Conn != nil {
 		defer relayTransport.Conn.Close()
 	}

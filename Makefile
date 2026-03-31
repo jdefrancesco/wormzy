@@ -9,7 +9,7 @@ PACKAGES := $(shell $(GOCMD) list ./... | grep -v "/mvp$$")
 GOSEC_DIRS := $(shell $(GOCMD) list -f '{{.Dir}}' ./... | grep -v "/mvp$$")
 
 DEFAULT_BINARY=wormzy
-BINARIES := wormzy rendezvous stuncheck mailbox dashboard
+BINARIES := wormzy rendezvous stuncheck mailbox dashboard relay
 
 all: test build 
 
@@ -17,6 +17,7 @@ deploy: build install
 	-@sudo systemctl daemon-reload
 	-@sudo systemctl restart wormzy-mailbox.service
 	-@sudo systemctl restart wormzy-rendezvous.service
+	-@sudo systemctl restart wormzy-relay.service
 
 debug:
 	$(GOBUILD) -o $(DEFAULT_BINARY) -gcflags "all=-N -l" -v ./cmd/wormzy

@@ -1,0 +1,19 @@
+[Unit]
+Description=Wormzy QUIC relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wormzy
+Group=wormzy
+EnvironmentFile=-/etc/wormzy/relay.env
+ExecStart=/usr/local/bin/relay -listen ${WORMZY_RELAY_LISTEN:-:3478}
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65535
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
