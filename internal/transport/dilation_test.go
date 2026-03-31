@@ -16,9 +16,12 @@ func TestSelectPeerCandidatePrefersLocalWhenSamePublic(t *testing.T) {
 			{Type: "local", Proto: "udp", Addr: "192.168.10.25:7000", Priority: 60},
 		},
 	}
-	cand, err := selectPeerCandidate(self, peer, false)
+	cand, relay, err := selectPeerCandidate(self, peer, false)
 	if err != nil {
 		t.Fatalf("selectPeerCandidate err: %v", err)
+	}
+	if relay != nil {
+		t.Fatalf("unexpected relay candidate: %+v", relay)
 	}
 	if cand.Addr != peer.Local {
 		t.Fatalf("expected local candidate %s, got %s", peer.Local, cand.Addr)
@@ -35,9 +38,12 @@ func TestSelectPeerCandidateReflexiveByDefault(t *testing.T) {
 			{Type: "local", Proto: "udp", Addr: "192.168.10.25:7000", Priority: 60},
 		},
 	}
-	cand, err := selectPeerCandidate(self, peer, false)
+	cand, relay, err := selectPeerCandidate(self, peer, false)
 	if err != nil {
 		t.Fatalf("selectPeerCandidate err: %v", err)
+	}
+	if relay != nil {
+		t.Fatalf("unexpected relay candidate: %+v", relay)
 	}
 	if cand.Type != "reflexive" {
 		t.Fatalf("expected reflexive candidate, got %+v", cand)
@@ -52,11 +58,30 @@ func TestSelectPeerCandidateLoopback(t *testing.T) {
 			{Type: "local", Proto: "udp", Addr: "127.0.0.1:7000", Priority: 60},
 		},
 	}
-	cand, err := selectPeerCandidate(self, peer, true)
+	cand, relay, err := selectPeerCandidate(self, peer, true)
 	if err != nil {
 		t.Fatalf("selectPeerCandidate err: %v", err)
 	}
+	if relay != nil {
+		t.Fatalf("unexpected relay candidate: %+v", relay)
+	}
 	if cand.Addr != peer.Local {
 		t.Fatalf("expected loopback candidate %s, got %s", peer.Local, cand.Addr)
+	}
+}
+
+func TestSelectPeerCandidatePicksRelayAsLastResort(t *testing.T) {
+	self := rendezvous.SelfInfo{}
+	peer := rendezvous.SelfInfo{
+		Candidates: []rendezvous.Candidate{
+			{Type: "relay", Proto: "udp", Addr: "relay.example.com:3478", Priority: 40},
+		},
+	}
+	cand, relay, err := selectPeerCandidate(self, peer, false)
+	if err != nil {
+		t.Fatalf("selectPeerCandidate err: %v", err)
+	}
+	if cand.Type != "relay" || relay == nil {
+		t.Fatalf("expected relay candidate fallback, got %+v relay %+v", cand, relay)
 	}
 }

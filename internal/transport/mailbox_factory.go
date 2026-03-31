@@ -16,6 +16,9 @@ func newMailbox(ctx context.Context, cfg Config) (mailbox, error) {
 }
 
 func newHTTPClient(timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
 	return &http.Client{
 		Timeout: timeout,
 	}

@@ -3,6 +3,7 @@ package transport
 import (
 	"errors"
 	"net"
+	"strings"
 
 	"github.com/jdefrancesco/wormzy/internal/rendezvous"
 )
@@ -12,7 +13,7 @@ const (
 	chunkSize  = 1 << 16
 )
 
-func buildCandidates(self rendezvous.SelfInfo, loopback bool) []rendezvous.Candidate {
+func buildCandidates(self rendezvous.SelfInfo, loopback bool, relayAddr string) []rendezvous.Candidate {
 	var out []rendezvous.Candidate
 	seen := make(map[string]bool)
 	add := func(typ, proto, addr string, prio int) {
@@ -39,17 +40,18 @@ func buildCandidates(self rendezvous.SelfInfo, loopback bool) []rendezvous.Candi
 
 	add("reflexive", "udp", self.Public, 100)
 	add("local", "udp", self.Local, 60)
+	add("relay", "udp", relayAddr, 40)
 	return out
 }
 
-func selectPeerCandidate(self, peer rendezvous.SelfInfo, loopback bool) (rendezvous.Candidate, error) {
+func selectPeerCandidate(self, peer rendezvous.SelfInfo, loopback bool) (rendezvous.Candidate, *rendezvous.Candidate, error) {
 	if loopback && peer.Local != "" {
 		return rendezvous.Candidate{
 			Type:     "loopback",
 			Proto:    "udp",
 			Addr:     peer.Local,
 			Priority: 120,
-		}, nil
+		}, nil, nil
 	}
 
 	preferLocal := loopback || samePublicIP(self.Public, peer.Public)
@@ -57,12 +59,20 @@ func selectPeerCandidate(self, peer rendezvous.SelfInfo, loopback bool) (rendezv
 	var (
 		best      *rendezvous.Candidate
 		bestLocal *rendezvous.Candidate
+		relayCand *rendezvous.Candidate
 	)
 	for _, cand := range peer.Candidates {
 		if cand.Proto != "udp" {
 			continue
 		}
 		cand := cand
+		if strings.Contains(strings.ToLower(cand.Type), "relay") {
+			if relayCand == nil {
+				relayCand = &cand
+			}
+			// Never pick relay as best unless no other options.
+			continue
+		}
 		if cand.Type == "local" && preferLocal {
 			if bestLocal == nil || cand.Priority > bestLocal.Priority {
 				bestLocal = &cand
@@ -73,10 +83,13 @@ func selectPeerCandidate(self, peer rendezvous.SelfInfo, loopback bool) (rendezv
 		}
 	}
 	if preferLocal && bestLocal != nil {
-		return *bestLocal, nil
+		return *bestLocal, relayCand, nil
 	}
 	if best != nil {
-		return *best, nil
+		return *best, relayCand, nil
+	}
+	if relayCand != nil {
+		return *relayCand, relayCand, nil
 	}
 	if peer.Public != "" && !preferLocal {
 		return rendezvous.Candidate{
@@ -84,7 +97,7 @@ func selectPeerCandidate(self, peer rendezvous.SelfInfo, loopback bool) (rendezv
 			Proto:    "udp",
 			Addr:     peer.Public,
 			Priority: 10,
-		}, nil
+		}, relayCand, nil
 	}
 	if peer.Local != "" {
 		return rendezvous.Candidate{
@@ -92,9 +105,9 @@ func selectPeerCandidate(self, peer rendezvous.SelfInfo, loopback bool) (rendezv
 			Proto:    "udp",
 			Addr:     peer.Local,
 			Priority: 5,
-		}, nil
+		}, relayCand, nil
 	}
-	return rendezvous.Candidate{}, errors.New("peer did not advertise any UDP candidates")
+	return rendezvous.Candidate{}, relayCand, errors.New("peer did not advertise any UDP candidates")
 }
 
 func samePublicIP(a, b string) bool {

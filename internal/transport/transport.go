@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
-	"crypto/rand"
+	crand "crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/tls"
@@ -19,7 +19,9 @@ import (
 	"io/fs"
 	"math"
 	"math/big"
+	mrand "math/rand"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -42,8 +44,10 @@ const (
 	// defaultRelay is the baked-in rendezvous/mailbox endpoint. Users can override
 	// via CLI flag or environment (WORMZY_RELAY_URL / WORMZY_RELAY).
 	defaultRelay          = "https://relay.wormzy.io"
+	defaultRelayUDPPort   = 3478
 	defaultHandshakeTO    = 90 * time.Second
 	defaultTransferIdleTO = 5 * time.Minute
+	relayFallbackDelay    = 4 * time.Second
 
 	// Wire-format sizing limits.
 	maxUint16PayloadLen = (1 << 16) - 1
@@ -165,7 +169,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 			self.Public = self.Local
 		}
 	}
-	self.Candidates = buildCandidates(self, cfg.Loopback)
+	self.Candidates = buildCandidates(self, cfg.Loopback, cfg.relayCandidateAddr())
 
 	mbox, err := newMailbox(ctx, cfg)
 	if err != nil {
@@ -181,7 +185,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		finalErr = err
 		return nil, err
 	}
-	chosen, err := selectPeerCandidate(self, peer, cfg.Loopback)
+	chosen, relayCand, err := selectPeerCandidate(self, peer, cfg.Loopback)
 	if err != nil {
 		reporter.Stage(StageRendezvous, StageStateError, err.Error())
 		return nil, err
@@ -217,7 +221,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		return nil, err
 	}
 
-	punchCtx, cancelPunch := context.WithTimeout(ctx, cfg.HandshakeTimeout)
+	punchCtx, cancelPunch := context.WithCancel(ctx)
 	defer cancelPunch()
 	stopPunch := make(chan struct{})
 	var punchWG sync.WaitGroup
@@ -240,46 +244,136 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		HandshakeIdleTimeout: cfg.HandshakeTimeout,
 	}
 
-	var quicConn *quic.Conn
+	reporter.Stage(StageQUIC, StageStateRunning, "punching + dialing")
+	ln, err := quicTransport.Listen(serverTLS, quicConf)
+	if err != nil {
+		return nil, err
+	}
+	defer ln.Close()
 
-	switch cfg.Mode {
-	case "send":
-		reporter.Stage(StageQUIC, StageStateRunning, "listening for peer")
-		ln, err := quicTransport.Listen(serverTLS, quicConf)
-		if err != nil {
-			return nil, err
+	type quicResult struct {
+		conn      *quic.Conn
+		initiated bool
+		err       error
+	}
+	resCh := make(chan quicResult, 4)
+	ctxConn, cancelConn := context.WithTimeout(ctx, cfg.HandshakeTimeout)
+
+	// Accept path
+	go func() {
+		conn, err := ln.Accept(ctxConn)
+		resCh <- quicResult{conn: conn, initiated: false, err: err}
+	}()
+
+	launchDial := func(delay time.Duration) {
+		go func() {
+			if delay > 0 {
+				time.Sleep(delay)
+			}
+			conn, err := quicTransport.Dial(ctxConn, peerUDP, clientTLS, quicConf)
+			resCh <- quicResult{conn: conn, initiated: true, err: err}
+		}()
+	}
+	if cfg.Mode == "send" {
+		launchDial(200 * time.Millisecond)
+	} else {
+		launchDial(0)
+	}
+	// simultaneous-open retry
+	launchDial(500 * time.Millisecond)
+
+	var quicConn *quic.Conn
+	initiated := cfg.Mode == "recv"
+	usedCandidate := chosen
+	var firstErr error
+	relayAttempted := false
+	var relayTransport *quic.Transport
+	fallbackTimer := time.NewTimer(relayFallbackDelay)
+	defer fallbackTimer.Stop()
+
+waitLoop:
+	for quicConn == nil {
+		select {
+		case res := <-resCh:
+			if res.err == nil && res.conn != nil {
+				quicConn = res.conn
+				initiated = res.initiated
+				break waitLoop
+			}
+			if firstErr == nil {
+				firstErr = res.err
+			}
+		case <-fallbackTimer.C:
+			if relayCand != nil && !relayAttempted {
+				relayAttempted = true
+				close(stopPunch)
+				punchWG.Wait()
+				cancelConn()
+				reporter.Logf("falling back to relay %s", relayCand.Addr)
+				reporter.Stage(StageQUIC, StageStateRunning, "relay fallback")
+				relayCtx, cancelRelay := context.WithTimeout(ctx, cfg.HandshakeTimeout)
+				rConn, rTransport, err := dialRelay(relayCtx, relayCand.Addr, cfg)
+				if err == nil {
+					if err := registerRelay(relayCtx, rConn, code, cfg.Mode, psk); err == nil {
+						quicConn = rConn
+						relayTransport = rTransport
+						initiated = cfg.Mode == "send"
+						usedCandidate = *relayCand
+					} else {
+						_ = rConn.CloseWithError(0, err.Error())
+					}
+				}
+				cancelRelay()
+			}
+		case <-ctxConn.Done():
+			if quicConn != nil {
+				break waitLoop
+			}
+			if firstErr == nil {
+				firstErr = ctxConn.Err()
+			}
+			if relayAttempted && relayCand != nil {
+				// keep waiting until relay attempt finishes
+				continue
+			}
+			reporter.Stage(StageQUIC, StageStateError, firstErr.Error())
+			return nil, firstErr
 		}
-		defer ln.Close()
-		reporter.Logf("waiting for peer to dial QUIC")
-		ctxAccept, cancelAccept := context.WithTimeout(ctx, cfg.HandshakeTimeout)
-		defer cancelAccept()
-		conn, err := ln.Accept(ctxAccept)
-		if err != nil {
-			reporter.Stage(StageQUIC, StageStateError, err.Error())
-			return nil, err
+	}
+	cancelConn()
+
+	if quicConn == nil {
+		err := firstErr
+		if err == nil {
+			err = fmt.Errorf("failed to establish QUIC")
 		}
-		quicConn = conn
-		reporter.Logf("accepted QUIC connection from %s", conn.RemoteAddr())
-		reporter.Stage(StageQUIC, StageStateDone, conn.RemoteAddr().String())
-	case "recv":
-		reporter.Stage(StageQUIC, StageStateRunning, "dialing peer")
-		ctxDial, cancelDial := context.WithTimeout(ctx, cfg.HandshakeTimeout)
-		defer cancelDial()
-		conn, err := quicTransport.Dial(ctxDial, peerUDP, clientTLS, quicConf)
-		if err != nil {
-			reporter.Stage(StageQUIC, StageStateError, err.Error())
-			return nil, err
-		}
-		quicConn = conn
-		reporter.Logf("dialed QUIC peer %s", peerUDP)
-		reporter.Stage(StageQUIC, StageStateDone, peerUDP.String())
+		reporter.Stage(StageQUIC, StageStateError, err.Error())
+		return nil, err
 	}
 
-	close(stopPunch)
-	punchWG.Wait()
+	stats.Candidate = usedCandidate.Type
+	stats.Transport = transportLabelForCandidate(usedCandidate)
+
+	if usedCandidate.Type != "relay" {
+		close(stopPunch)
+		punchWG.Wait()
+	}
+	if relayTransport != nil && relayTransport.Conn != nil {
+		defer relayTransport.Conn.Close()
+	}
+
+	if usedCandidate.Type == "relay" {
+		reporter.Stage(StageQUIC, StageStateDone, "relay fallback")
+	} else if initiated {
+		reporter.Logf("dialed QUIC peer %s", peerUDP)
+		reporter.Stage(StageQUIC, StageStateDone, peerUDP.String())
+	} else {
+		reporter.Logf("accepted QUIC connection from %s", quicConn.RemoteAddr())
+		reporter.Stage(StageQUIC, StageStateDone, quicConn.RemoteAddr().String())
+	}
 
 	reporter.Stage(StageNoise, StageStateRunning, "noise handshake")
-	fileKey, sas, err := runNoiseOverQUIC(quicConn, cfg.Mode == "recv", psk)
+	fileKey, sas, err := runNoiseOverQUIC(quicConn, initiated, psk)
 	if err != nil {
 		reporter.Stage(StageNoise, StageStateError, err.Error())
 		return nil, err
@@ -356,15 +450,41 @@ func (cfg Config) validate() error {
 }
 
 func (cfg Config) stunServers() []string {
-	if len(cfg.STUNServers) > 0 {
-		return cfg.STUNServers
+	list := cfg.STUNServers
+	if len(list) == 0 {
+		list = append([]string{}, stun.StunServers...)
+	} else {
+		list = append([]string{}, cfg.STUNServers...)
 	}
-	return stun.StunServers
+	src := mrand.NewSource(time.Now().UnixNano())
+	r := mrand.New(src)
+	r.Shuffle(len(list), func(i, j int) { list[i], list[j] = list[j], list[i] })
+	return list
 }
 
 // DefaultRelay returns the compiled-in rendezvous Redis endpoint.
 func DefaultRelay() string {
 	return defaultRelay
+}
+
+func (cfg Config) relayCandidateAddr() string {
+	if cfg.RelayAddr == "" {
+		return ""
+	}
+	u, err := url.Parse(cfg.RelayAddr)
+	if err == nil && u.Host != "" {
+		host := u.Hostname()
+		port := u.Port()
+		if port == "" {
+			port = strconv.Itoa(defaultRelayUDPPort)
+		}
+		return net.JoinHostPort(host, port)
+	}
+	// Non-URL input; if it already carries a port, trust it.
+	if _, _, err := net.SplitHostPort(cfg.RelayAddr); err == nil {
+		return cfg.RelayAddr
+	}
+	return net.JoinHostPort(cfg.RelayAddr, strconv.Itoa(defaultRelayUDPPort))
 }
 
 // rendezvousExchange coordinates code assignment, PAKE, and peer discovery over the mailbox.
@@ -489,7 +609,7 @@ func runNoiseOverQUIC(conn *quic.Conn, initiator bool, psk []byte) ([]byte, stri
 		Initiator:   initiator,
 		CipherSuite: suite,
 		Prologue:    []byte("wormzy-noise-v1"),
-		Random:      rand.Reader,
+		Random:      crand.Reader,
 	})
 	if err != nil {
 		return nil, "", err
@@ -670,7 +790,7 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, idle time.Durat
 		return nil, 0, err
 	}
 	var base [24]byte
-	if _, err := rand.Read(base[:]); err != nil {
+	if _, err := crand.Read(base[:]); err != nil {
 		return nil, 0, err
 	}
 	if _, err := us.Write(base[:]); err != nil {
@@ -872,7 +992,7 @@ func pickDownloadPath(dir, filename string) (string, bool, error) {
 		}
 	}
 	var randBuf [4]byte
-	if _, err := rand.Read(randBuf[:]); err == nil {
+	if _, err := crand.Read(randBuf[:]); err == nil {
 		candidate := filepath.Join(dir, fmt.Sprintf("%s-%s%s", stem, hex.EncodeToString(randBuf[:]), ext))
 		return candidate, true, nil
 	}
@@ -977,7 +1097,7 @@ func deriveSAS(transcript []byte, psk []byte) string {
 }
 
 func punchLoop(ctx context.Context, conn *net.UDPConn, peer *net.UDPAddr, stop <-chan struct{}) {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
 	msg := []byte("punch")
 	for {
@@ -1016,11 +1136,11 @@ func verifyMetadata(reader *aeadReader, digest []byte) error {
 }
 
 func selfSignedTLS() (*tls.Config, error) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := rsa.GenerateKey(crand.Reader, 2048)
 	if err != nil {
 		return nil, err
 	}
-	serial, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
+	serial, _ := crand.Int(crand.Reader, big.NewInt(1<<62))
 	tpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
@@ -1032,7 +1152,7 @@ func selfSignedTLS() (*tls.Config, error) {
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
+	der, err := x509.CreateCertificate(crand.Reader, tpl, tpl, &key.PublicKey, key)
 	if err != nil {
 		return nil, err
 	}
