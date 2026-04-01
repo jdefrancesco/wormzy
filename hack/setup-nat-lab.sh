@@ -1,103 +1,108 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# setup-nat-lab.sh
+# setup-nat-lab-uplink.sh
 #
-# One-command Linux network-namespace NAT lab for testing Wormzy NAT punching.
+# One-command NAT lab for Wormzy where BOTH clients are behind separate NATs
+# but still have outbound access to the REAL Internet via the host uplink.
 #
 # Topology:
 #
-#   nsA (10.0.0.2) -- natA --+
-#                            +-- inet (100.64.0.0/24)
-#   nsB (10.0.1.2) -- natB --+
+#   nsA (10.10.0.2) -- natA (10.10.0.1 / 172.31.0.2) --+
+#                                                       |
+#                                                    host bridge br-wormzy (172.31.0.1)
+#                                                       |
+#   nsB (10.20.0.2) -- natB (10.20.0.1 / 172.31.0.3) --+
+#                                                       |
+#                                                     host uplink (eth0 / wlan0 / ...)
+#                                                       |
+#                                                  real Internet / relay.wormzy.io
 #
-# natA lives in namespace natA, natB in namespace natB.
-# inet can host tcpdump, STUN, relay, etc.
+# NAT A and NAT B are independent Linux namespaces.
+# The host does final egress NAT to the real uplink so nsA and nsB can reach:
+#   - relay.wormzy.io
+#   - public STUN servers
+#   - anything else on the real Internet
 #
 # Modes:
-#   cone       basic MASQUERADE NAT on both sides
-#   symmetric  randomized SNAT port ranges on both sides
+#   cone       MASQUERADE on natA/natB
+#   symmetric  randomized SNAT port ranges on natA/natB
 #
 # Usage:
-#   sudo ./setup-nat-lab.sh up
-#   sudo ./setup-nat-lab.sh up --mode symmetric
-#   sudo ./setup-nat-lab.sh status
-#   sudo ./setup-nat-lab.sh shell nsA
-#   sudo ./setup-nat-lab.sh shell nsB
-#   sudo ./setup-nat-lab.sh exec nsA ip a
-#   sudo ./setup-nat-lab.sh down
+#   sudo ./setup-nat-lab-uplink.sh up --uplink eth0
+#   sudo ./setup-nat-lab-uplink.sh up --uplink wlan0 --mode symmetric
+#   sudo ./setup-nat-lab-uplink.sh status
+#   sudo ./setup-nat-lab-uplink.sh shell nsA
+#   sudo ./setup-nat-lab-uplink.sh exec nsA ./wormzy send ./file.bin
+#   sudo ./setup-nat-lab-uplink.sh down
 #
-# Typical Wormzy test:
-#   sudo ./setup-nat-lab.sh up --mode cone
-#   sudo ip netns exec nsA ./wormzy send ./file.bin
-#   sudo ip netns exec nsB ./wormzy recv
-#
-# Optional: run tcpdump in inet namespace
-#   sudo ip netns exec inet tcpdump -i any -nn udp
-#
-# Optional: run relay / mailbox / STUN in inet namespace
-#   sudo ip netns exec inet <command>
+# Notes:
+#   - Linux only
+#   - Requires iproute2 + iptables
+#   - The host's FORWARD policy may be adjusted while the lab is active
+#   - This script tags host-side iptables rules with a unique comment for cleanup
 
-LAB_TAG="wormzy-natlab"
+LAB_TAG="wormzy-natlab-uplink"
+BRIDGE="br-wormzy"
+UPLINK=""
 
-# Namespaces
 NSA="nsA"
 NSB="nsB"
 NATA="natA"
 NATB="natB"
-INET="inet"
 
-# Links
 A_IN="veth-a-in"
 A_NAT="veth-a-nat"
+A_HOST="veth-a-host"
 A_WAN="veth-a-wan"
-A_INET="veth-a-inet"
 
 B_IN="veth-b-in"
 B_NAT="veth-b-nat"
+B_HOST="veth-b-host"
 B_WAN="veth-b-wan"
-B_INET="veth-b-inet"
 
-# Addressing
-NSA_IP="10.0.0.2/24"
-NSA_GW="10.0.0.1"
-NATA_LAN_IP="10.0.0.1/24"
-NATA_WAN_IP="100.64.0.10/24"
+NSA_IP="10.10.0.2/24"
+NSA_GW="10.10.0.1"
+NATA_LAN_IP="10.10.0.1/24"
+NATA_WAN_IP="172.31.0.2/24"
 
-NSB_IP="10.0.1.2/24"
-NSB_GW="10.0.1.1"
-NATB_LAN_IP="10.0.1.1/24"
-NATB_WAN_IP="100.64.0.20/24"
+NSB_IP="10.20.0.2/24"
+NSB_GW="10.20.0.1"
+NATB_LAN_IP="10.20.0.1/24"
+NATB_WAN_IP="172.31.0.3/24"
 
-INET_A_IP="100.64.0.1/24"
-INET_B_IP="100.64.0.2/24"
+HOST_BRIDGE_IP="172.31.0.1/24"
+HOST_NET_CIDR="172.31.0.0/24"
 
 MODE="cone"
 
 usage() {
   cat <<'EOF'
 Usage:
-  setup-nat-lab.sh <command> [options]
+  setup-nat-lab-uplink.sh <command> [options]
 
 Commands:
-  up                  Create the NAT lab
-  down                Tear down the NAT lab
-  status              Show namespace / route / NAT status
-  shell <ns>          Open a shell inside a namespace
-  exec <ns> <cmd...>  Run a command inside a namespace
+  up                     Create the NAT lab with real Internet uplink
+  down                   Tear down the NAT lab
+  status                 Show namespace / route / NAT status
+  shell <ns>             Open a shell inside a namespace
+  exec <ns> <cmd...>     Run a command inside a namespace
 
 Options for "up":
-  --mode cone|symmetric   NAT mode (default: cone)
+  --uplink IFACE         REQUIRED host uplink interface (example: eth0, wlan0, enp3s0)
+  --mode cone|symmetric  NAT mode for natA/natB (default: cone)
 
 Examples:
-  sudo ./setup-nat-lab.sh up
-  sudo ./setup-nat-lab.sh up --mode symmetric
-  sudo ./setup-nat-lab.sh shell nsA
-  sudo ./setup-nat-lab.sh exec inet tcpdump -i any -nn udp
-  sudo ./setup-nat-lab.sh down
+  sudo ./setup-nat-lab-uplink.sh up --uplink eth0
+  sudo ./setup-nat-lab-uplink.sh up --uplink wlan0 --mode symmetric
+  sudo ./setup-nat-lab-uplink.sh shell nsA
+  sudo ./setup-nat-lab-uplink.sh exec nsA curl -I https://relay.wormzy.io
+  sudo ./setup-nat-lab-uplink.sh exec nsA ./wormzy send ./file.bin
+  sudo ./setup-nat-lab-uplink.sh exec nsB ./wormzy recv
+  sudo ./setup-nat-lab-uplink.sh down
 
 Namespaces created:
-  nsA, natA, nsB, natB, inet
+  nsA, natA, nsB, natB
 EOF
 }
 
@@ -122,18 +127,8 @@ ns_exists() {
   ip netns list | awk '{print $1}' | grep -Fxq "$1"
 }
 
-cleanup_link() {
-  local ns="$1"
-  local link="$2"
-  if ns_exists "$ns"; then
-    ip netns exec "$ns" ip link del "$link" 2>/dev/null || true
-  fi
-}
-
-delete_ns() {
-  if ns_exists "$1"; then
-    ip netns del "$1" 2>/dev/null || true
-  fi
+bridge_exists() {
+  ip link show "$1" >/dev/null 2>&1
 }
 
 create_ns() {
@@ -143,14 +138,59 @@ create_ns() {
   fi
 }
 
+delete_ns() {
+  if ns_exists "$1"; then
+    ip netns del "$1" 2>/dev/null || true
+  fi
+}
+
 set_lo_up() {
   ip netns exec "$1" ip link set lo up
 }
 
-label_link() {
-  local ns="$1"
-  local link="$2"
-  ip netns exec "$ns" ip link set dev "$link" alias "$LAB_TAG" 2>/dev/null || true
+delete_host_link() {
+  ip link del "$1" 2>/dev/null || true
+}
+
+cleanup_bridge() {
+  if bridge_exists "$BRIDGE"; then
+    ip link set "$BRIDGE" down 2>/dev/null || true
+    ip link del "$BRIDGE" type bridge 2>/dev/null || true
+  fi
+}
+
+enable_forwarding() {
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null
+  ip netns exec "$NATA" sysctl -w net.ipv4.ip_forward=1 >/dev/null
+  ip netns exec "$NATB" sysctl -w net.ipv4.ip_forward=1 >/dev/null
+}
+
+host_rule_exists() {
+  local table="$1"
+  shift
+  iptables ${table:+-t "$table"} -C "$@" >/dev/null 2>&1
+}
+
+add_host_rule() {
+  local table="$1"
+  shift
+  if ! iptables ${table:+-t "$table"} -C "$@" >/dev/null 2>&1; then
+    iptables ${table:+-t "$table"} -A "$@"
+  fi
+}
+
+del_host_rule() {
+  local table="$1"
+  shift
+  while iptables ${table:+-t "$table"} -C "$@" >/dev/null 2>&1; do
+    iptables ${table:+-t "$table"} -D "$@"
+  done
+}
+
+create_bridge() {
+  ip link add name "$BRIDGE" type bridge
+  ip addr add "$HOST_BRIDGE_IP" dev "$BRIDGE"
+  ip link set "$BRIDGE" up
 }
 
 setup_nsA() {
@@ -164,9 +204,6 @@ setup_nsA() {
 
   ip netns exec "$NATA" ip addr add "$NATA_LAN_IP" dev "$A_NAT"
   ip netns exec "$NATA" ip link set "$A_NAT" up
-
-  label_link "$NSA" "$A_IN"
-  label_link "$NATA" "$A_NAT"
 }
 
 setup_nsB() {
@@ -180,51 +217,33 @@ setup_nsB() {
 
   ip netns exec "$NATB" ip addr add "$NATB_LAN_IP" dev "$B_NAT"
   ip netns exec "$NATB" ip link set "$B_NAT" up
-
-  label_link "$NSB" "$B_IN"
-  label_link "$NATB" "$B_NAT"
 }
 
-setup_natA_wan() {
-  ip link add "$A_WAN" type veth peer name "$A_INET"
+setup_natA_uplink() {
+  ip link add "$A_HOST" type veth peer name "$A_WAN"
   ip link set "$A_WAN" netns "$NATA"
-  ip link set "$A_INET" netns "$INET"
+
+  ip link set "$A_HOST" master "$BRIDGE"
+  ip link set "$A_HOST" up
 
   ip netns exec "$NATA" ip addr add "$NATA_WAN_IP" dev "$A_WAN"
   ip netns exec "$NATA" ip link set "$A_WAN" up
-  ip netns exec "$NATA" ip route add default via "${INET_A_IP%/*}"
-
-  ip netns exec "$INET" ip addr add "$INET_A_IP" dev "$A_INET"
-  ip netns exec "$INET" ip link set "$A_INET" up
-
-  label_link "$NATA" "$A_WAN"
-  label_link "$INET" "$A_INET"
+  ip netns exec "$NATA" ip route add default via "${HOST_BRIDGE_IP%/*}"
 }
 
-setup_natB_wan() {
-  ip link add "$B_WAN" type veth peer name "$B_INET"
+setup_natB_uplink() {
+  ip link add "$B_HOST" type veth peer name "$B_WAN"
   ip link set "$B_WAN" netns "$NATB"
-  ip link set "$B_INET" netns "$INET"
+
+  ip link set "$B_HOST" master "$BRIDGE"
+  ip link set "$B_HOST" up
 
   ip netns exec "$NATB" ip addr add "$NATB_WAN_IP" dev "$B_WAN"
   ip netns exec "$NATB" ip link set "$B_WAN" up
-  ip netns exec "$NATB" ip route add default via "${INET_B_IP%/*}"
-
-  ip netns exec "$INET" ip addr add "$INET_B_IP" dev "$B_INET"
-  ip netns exec "$INET" ip link set "$B_INET" up
-
-  label_link "$NATB" "$B_WAN"
-  label_link "$INET" "$B_INET"
+  ip netns exec "$NATB" ip route add default via "${HOST_BRIDGE_IP%/*}"
 }
 
-enable_forwarding() {
-  ip netns exec "$NATA" sysctl -w net.ipv4.ip_forward=1 >/dev/null
-  ip netns exec "$NATB" sysctl -w net.ipv4.ip_forward=1 >/dev/null
-  ip netns exec "$INET" sysctl -w net.ipv4.ip_forward=1 >/dev/null
-}
-
-setup_filtering() {
-  # Accept forwarding on the NATs
+setup_nat_filters() {
   ip netns exec "$NATA" iptables -P FORWARD DROP
   ip netns exec "$NATA" iptables -A FORWARD -i "$A_NAT" -o "$A_WAN" -j ACCEPT
   ip netns exec "$NATA" iptables -A FORWARD -i "$A_WAN" -o "$A_NAT" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
@@ -232,21 +251,45 @@ setup_filtering() {
   ip netns exec "$NATB" iptables -P FORWARD DROP
   ip netns exec "$NATB" iptables -A FORWARD -i "$B_NAT" -o "$B_WAN" -j ACCEPT
   ip netns exec "$NATB" iptables -A FORWARD -i "$B_WAN" -o "$B_NAT" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-
-  # inet is the "public internet"; let traffic pass freely there
-  ip netns exec "$INET" iptables -P FORWARD ACCEPT
 }
 
 setup_nat_cone() {
-  ip netns exec "$NATA" iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$A_WAN" -j MASQUERADE
-  ip netns exec "$NATB" iptables -t nat -A POSTROUTING -s 10.0.1.0/24 -o "$B_WAN" -j MASQUERADE
+  ip netns exec "$NATA" iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -o "$A_WAN" -j MASQUERADE
+  ip netns exec "$NATB" iptables -t nat -A POSTROUTING -s 10.20.0.0/24 -o "$B_WAN" -j MASQUERADE
 }
 
 setup_nat_symmetric() {
-  ip netns exec "$NATA" iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o "$A_WAN" \
-    -j SNAT --to-source 100.64.0.10:40000-50000 --random
-  ip netns exec "$NATB" iptables -t nat -A POSTROUTING -s 10.0.1.0/24 -o "$B_WAN" \
-    -j SNAT --to-source 100.64.0.20:40000-50000 --random
+  ip netns exec "$NATA" iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -o "$A_WAN" \
+    -j SNAT --to-source 172.31.0.2:40000-50000 --random
+  ip netns exec "$NATB" iptables -t nat -A POSTROUTING -s 10.20.0.0/24 -o "$B_WAN" \
+    -j SNAT --to-source 172.31.0.3:50001-60000 --random
+}
+
+setup_host_rules() {
+  # Forward between bridge and uplink
+  add_host_rule "" FORWARD -i "$BRIDGE" -o "$UPLINK" -m comment --comment "$LAB_TAG" -j ACCEPT
+  add_host_rule "" FORWARD -i "$UPLINK" -o "$BRIDGE" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "$LAB_TAG" -j ACCEPT
+
+  # Final egress NAT from bridge net to real Internet
+  add_host_rule "nat" POSTROUTING -s "$HOST_NET_CIDR" -o "$UPLINK" -m comment --comment "$LAB_TAG" -j MASQUERADE
+}
+
+remove_host_rules() {
+  del_host_rule "nat" POSTROUTING -s "$HOST_NET_CIDR" -o "$UPLINK" -m comment --comment "$LAB_TAG" -j MASQUERADE || true
+  del_host_rule "" FORWARD -i "$UPLINK" -o "$BRIDGE" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "$LAB_TAG" -j ACCEPT || true
+  del_host_rule "" FORWARD -i "$BRIDGE" -o "$UPLINK" -m comment --comment "$LAB_TAG" -j ACCEPT || true
+}
+
+detect_uplink() {
+  ip route get 1.1.1.1 2>/dev/null | awk '
+    {
+      for (i=1; i<=NF; i++) {
+        if ($i == "dev" && (i+1) <= NF) {
+          print $(i+1)
+          exit
+        }
+      }
+    }'
 }
 
 setup_lab() {
@@ -257,26 +300,31 @@ setup_lab() {
   need_cmd awk
   need_cmd grep
 
+  if [[ -z "$UPLINK" ]]; then
+    UPLINK="$(detect_uplink || true)"
+  fi
+  [[ -n "$UPLINK" ]] || { err "Could not auto-detect uplink. Pass --uplink IFACE."; exit 1; }
+  ip link show "$UPLINK" >/dev/null 2>&1 || { err "Uplink interface not found: $UPLINK"; exit 1; }
+
   teardown_lab >/dev/null 2>&1 || true
 
   create_ns "$NSA"
   create_ns "$NSB"
   create_ns "$NATA"
   create_ns "$NATB"
-  create_ns "$INET"
 
   set_lo_up "$NSA"
   set_lo_up "$NSB"
   set_lo_up "$NATA"
   set_lo_up "$NATB"
-  set_lo_up "$INET"
 
+  create_bridge
   setup_nsA
   setup_nsB
-  setup_natA_wan
-  setup_natB_wan
+  setup_natA_uplink
+  setup_natB_uplink
   enable_forwarding
-  setup_filtering
+  setup_nat_filters
 
   case "$MODE" in
     cone) setup_nat_cone ;;
@@ -287,62 +335,82 @@ setup_lab() {
       ;;
   esac
 
-  log "NAT lab is up."
+  setup_host_rules
+
+  log "NAT uplink lab is up."
   echo
   echo "Namespaces:"
   echo "  $NSA   client A"
   echo "  $NATA  NAT A"
   echo "  $NSB   client B"
   echo "  $NATB  NAT B"
-  echo "  $INET  internet / relay / STUN"
+  echo
+  echo "Host bridge: $BRIDGE (${HOST_BRIDGE_IP%/*})"
+  echo "Host uplink: $UPLINK"
+  echo "Mode:        $MODE"
   echo
   echo "Addresses:"
-  echo "  $NSA -> ${NSA_IP%/*} via $NSA_GW"
-  echo "  $NSB -> ${NSB_IP%/*} via $NSB_GW"
-  echo "  $NATA WAN -> ${NATA_WAN_IP%/*}"
-  echo "  $NATB WAN -> ${NATB_WAN_IP%/*}"
-  echo "  $INET side A -> ${INET_A_IP%/*}"
-  echo "  $INET side B -> ${INET_B_IP%/*}"
+  echo "  $NSA  -> ${NSA_IP%/*} via $NSA_GW"
+  echo "  $NATA -> LAN ${NATA_LAN_IP%/*}, WAN ${NATA_WAN_IP%/*}"
+  echo "  $NSB  -> ${NSB_IP%/*} via $NSB_GW"
+  echo "  $NATB -> LAN ${NATB_LAN_IP%/*}, WAN ${NATB_WAN_IP%/*}"
   echo
-  echo "Mode: $MODE"
+  echo "Quick tests:"
+  echo "  sudo ip netns exec $NSA ping -c 2 1.1.1.1"
+  echo "  sudo ip netns exec $NSB ping -c 2 1.1.1.1"
+  echo "  sudo ip netns exec $NSA curl -I https://relay.wormzy.io"
+  echo "  sudo ip netns exec $NSB curl -I https://relay.wormzy.io"
   echo
-  echo "Useful commands:"
-  echo "  sudo ip netns exec $NSA ip a"
-  echo "  sudo ip netns exec $NSB ip a"
-  echo "  sudo ip netns exec $INET tcpdump -i any -nn udp"
-  echo "  sudo ip netns exec $NSA ping -c 2 ${INET_A_IP%/*}"
-  echo "  sudo ip netns exec $NSB ping -c 2 ${INET_B_IP%/*}"
-  echo
-  echo "Typical Wormzy test:"
+  echo "Wormzy test:"
   echo "  sudo ip netns exec $NSA ./wormzy send ./file.bin"
   echo "  sudo ip netns exec $NSB ./wormzy recv"
+  echo
+  echo "Observability:"
+  echo "  sudo ip netns exec $NATA tcpdump -i any -nn udp"
+  echo "  sudo ip netns exec $NATB tcpdump -i any -nn udp"
+  echo "  sudo tcpdump -i $UPLINK -nn udp"
 }
 
 teardown_lab() {
   need_root
-  cleanup_link "$NSA" "$A_IN"
-  cleanup_link "$NSB" "$B_IN"
-  cleanup_link "$NATA" "$A_NAT"
-  cleanup_link "$NATA" "$A_WAN"
-  cleanup_link "$NATB" "$B_NAT"
-  cleanup_link "$NATB" "$B_WAN"
-  cleanup_link "$INET" "$A_INET"
-  cleanup_link "$INET" "$B_INET"
+  if [[ -z "$UPLINK" ]]; then
+    UPLINK="$(detect_uplink || true)"
+  fi
+
+  if [[ -n "$UPLINK" ]] && ip link show "$UPLINK" >/dev/null 2>&1; then
+    remove_host_rules || true
+  fi
+
+  delete_host_link "$A_HOST"
+  delete_host_link "$B_HOST"
+
+  cleanup_bridge
 
   delete_ns "$NSA"
   delete_ns "$NSB"
   delete_ns "$NATA"
   delete_ns "$NATB"
-  delete_ns "$INET"
 
-  log "NAT lab removed."
+  log "NAT uplink lab removed."
 }
 
 status_lab() {
   need_root
-  for ns in "$NSA" "$NATA" "$NSB" "$NATB" "$INET"; do
+  echo "Host"
+  echo "===="
+  echo "Uplink: ${UPLINK:-$(detect_uplink || true)}"
+  ip -br addr show "$BRIDGE" 2>/dev/null || true
+  echo
+  ip route | sed -n '1,20p'
+  echo
+  iptables -S | grep "$LAB_TAG" || true
+  echo
+  iptables -t nat -S | grep "$LAB_TAG" || true
+  echo
+
+  for ns in "$NSA" "$NATA" "$NSB" "$NATB"; do
+    echo "===== $ns ====="
     if ns_exists "$ns"; then
-      echo "===== $ns ====="
       ip netns exec "$ns" ip -br addr
       echo
       ip netns exec "$ns" ip route || true
@@ -352,7 +420,6 @@ status_lab() {
       ip netns exec "$ns" iptables -t nat -S 2>/dev/null || true
       echo
     else
-      echo "===== $ns ====="
       echo "not present"
       echo
     fi
@@ -384,6 +451,10 @@ case "$COMMAND" in
   up)
     while [[ $# -gt 0 ]]; do
       case "$1" in
+        --uplink)
+          UPLINK="${2:-}"
+          shift 2
+          ;;
         --mode)
           MODE="${2:-}"
           shift 2
@@ -402,9 +473,35 @@ case "$COMMAND" in
     setup_lab
     ;;
   down)
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --uplink)
+          UPLINK="${2:-}"
+          shift 2
+          ;;
+        *)
+          err "Unknown option for down: $1"
+          usage
+          exit 1
+          ;;
+      esac
+    done
     teardown_lab
     ;;
   status)
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --uplink)
+          UPLINK="${2:-}"
+          shift 2
+          ;;
+        *)
+          err "Unknown option for status: $1"
+          usage
+          exit 1
+          ;;
+      esac
+    done
     status_lab
     ;;
   shell)
