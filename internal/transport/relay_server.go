@@ -73,22 +73,35 @@ func (s *RelayServer) ListenAndServe(ctx context.Context) error {
 }
 
 func (s *RelayServer) handleConn(ctx context.Context, conn *quic.Conn) {
-	defer conn.CloseWithError(0, "")
 	stream, err := conn.AcceptStream(ctx)
 	if err != nil {
+		_ = conn.CloseWithError(0, "")
 		return
 	}
 	var hello relayHello
 	if err := json.NewDecoder(stream).Decode(&hello); err != nil {
 		s.log().Warn("relay hello decode", "err", err)
+		_ = conn.CloseWithError(0, "")
 		return
 	}
+	_ = stream.Close()
 
 	client := &relayServerClient{conn: conn, hello: hello}
 	pair := s.register(client)
 	if pair == nil {
+		// Keep the first peer connected until either:
+		//  1) a partner arrives and later closes, or
+		//  2) the peer disconnects / server shuts down.
+		select {
+		case <-ctx.Done():
+		case <-conn.Context().Done():
+		}
+		s.unregisterWaiting(client)
+		_ = conn.CloseWithError(0, "")
 		return
 	}
+	defer pair.a.conn.CloseWithError(0, "")
+	defer pair.b.conn.CloseWithError(0, "")
 
 	ctxPair, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -138,6 +151,18 @@ func (s *RelayServer) register(client *relayServerClient) *relayPair {
 	s.waiting[client.hello.Code] = client
 	s.log().Info("relay waiting", "code", client.hello.Code)
 	return nil
+}
+
+func (s *RelayServer) unregisterWaiting(client *relayServerClient) {
+	if client == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, ok := s.waiting[client.hello.Code]
+	if ok && existing == client {
+		delete(s.waiting, client.hello.Code)
+	}
 }
 
 func sendRelayReady(ctx context.Context, conn *quic.Conn) error {

@@ -49,6 +49,7 @@ const (
 	defaultHandshakeTO    = 90 * time.Second
 	defaultTransferIdleTO = 5 * time.Minute
 	relayFallbackDelay    = 4 * time.Second
+	relayRetryDelay       = 3 * time.Second
 
 	// Wire-format sizing limits.
 	maxUint16PayloadLen = (1 << 16) - 1
@@ -375,8 +376,8 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 	}
 	usedCandidate := pickFallbackDirectCandidate(dialableCandidates)
 	var firstErr error
-	relayAttempted := false
 	relayInFlight := false
+	relayAttempts := 0
 	directOutcome := "pending"
 	directStatus := make(map[string]string, len(directTargets))
 	for _, target := range directTargets {
@@ -388,12 +389,12 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		fallbackDelay = 0
 		directOutcome = "no-response"
 	}
-	fallbackTimer := time.NewTimer(fallbackDelay)
-	defer fallbackTimer.Stop()
 	const nonPreferredGrace = 650 * time.Millisecond
 	var provisional *quicResult
 	var provisionalTimer *time.Timer
 	var provisionalTimerCh <-chan time.Time
+	var relayTimer *time.Timer
+	var relayTimerCh <-chan time.Time
 	stopProvisionalTimer := func() {
 		if provisionalTimer == nil {
 			return
@@ -407,6 +408,37 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		provisionalTimer = nil
 		provisionalTimerCh = nil
 	}
+	stopRelayTimer := func() {
+		if relayTimer == nil {
+			return
+		}
+		if !relayTimer.Stop() {
+			select {
+			case <-relayTimer.C:
+			default:
+			}
+		}
+		relayTimer = nil
+		relayTimerCh = nil
+	}
+	scheduleRelayAttempt := func(delay time.Duration) {
+		if relayCand == nil {
+			return
+		}
+		if relayTimer == nil {
+			relayTimer = time.NewTimer(delay)
+		} else {
+			if !relayTimer.Stop() {
+				select {
+				case <-relayTimer.C:
+				default:
+				}
+			}
+			relayTimer.Reset(delay)
+		}
+		relayTimerCh = relayTimer.C
+	}
+	defer stopRelayTimer()
 	closeDirectConn := func(conn *quic.Conn, reason string) {
 		if conn == nil {
 			return
@@ -432,6 +464,12 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		}
 		directOutcome = "won"
 		reporter.Logf("direct race accepted from %s", res.conn.RemoteAddr())
+	}
+	if relayCand != nil {
+		reporter.Logf("relay/fallback armed delay=%s", fallbackDelay)
+		scheduleRelayAttempt(fallbackDelay)
+	} else {
+		reporter.Logf("relay/fallback unavailable (no relay candidate)")
 	}
 
 	// Sloppy NAT punching p2p-race logic goes here. If we miserably fail fallback and just use relay.
@@ -492,32 +530,44 @@ waitLoop:
 				provisional = nil
 				break waitLoop
 			}
-		case <-fallbackTimer.C:
-			if relayCand != nil && !relayAttempted {
-				relayAttempted = true
-				if directOutcome == "pending" {
-					directOutcome = "quic-timeout"
-				}
+		case <-relayTimerCh:
+			if relayCand == nil {
+				relayTimerCh = nil
+				continue
+			}
+			if relayInFlight {
+				scheduleRelayAttempt(relayRetryDelay)
+				continue
+			}
+			relayAttempts++
+			if directOutcome == "pending" {
+				directOutcome = "quic-timeout"
+			}
+			if relayAttempts == 1 {
 				reporter.Logf("falling back to relay %s", relayCand.Addr)
 				reporter.Stage(StageQUIC, StageStateRunning, "relay fallback")
-				relayInFlight = true
-				go func() {
-					rConn, rTransport, err := dialRelay(ctxConn, relayCand.Addr, cfg)
-					if err != nil {
-						relayResCh <- relayResult{err: err}
-						return
-					}
-					if err := registerRelay(ctxConn, rConn, code, cfg.Mode, psk); err != nil {
-						_ = rConn.CloseWithError(0, err.Error())
-						relayResCh <- relayResult{err: err}
-						return
-					}
-					relayResCh <- relayResult{conn: rConn, transport: rTransport}
-				}()
+			} else {
+				reporter.Logf("retrying relay fallback attempt=%d %s", relayAttempts, relayCand.Addr)
 			}
+			relayInFlight = true
+			scheduleRelayAttempt(relayRetryDelay)
+			go func() {
+				rConn, rTransport, err := dialRelay(ctxConn, relayCand.Addr, cfg)
+				if err != nil {
+					relayResCh <- relayResult{err: err}
+					return
+				}
+				if err := registerRelay(ctxConn, rConn, code, cfg.Mode, psk); err != nil {
+					_ = rConn.CloseWithError(0, err.Error())
+					relayResCh <- relayResult{err: err}
+					return
+				}
+				relayResCh <- relayResult{conn: rConn, transport: rTransport}
+			}()
 		case relay := <-relayResCh:
 			relayInFlight = false
 			if relay.err == nil && relay.conn != nil {
+				stopRelayTimer()
 				stopProvisionalTimer()
 				if provisional != nil {
 					closeDirectConn(provisional.conn, "relay fallback selected")
@@ -532,7 +582,7 @@ waitLoop:
 				}
 				break waitLoop
 			}
-			reporter.Logf("relay fallback attempt failed: %v", relay.err)
+			reporter.Logf("relay fallback attempt %d failed: %v", relayAttempts, relay.err)
 			if firstErr == nil {
 				firstErr = relay.err
 			}
@@ -1429,7 +1479,7 @@ func punchLoop(ctx context.Context, conn *net.UDPConn, peers []*net.UDPAddr, sto
 	}
 	interval := 150 * time.Millisecond
 	ticker := time.NewTicker(interval)
-	heartbeat := time.NewTicker(2 * time.Second)
+	heartbeat := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	defer heartbeat.Stop()
 

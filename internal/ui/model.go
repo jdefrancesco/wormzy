@@ -77,6 +77,8 @@ func NewModel(session Session) Model {
 	for i, st := range steps {
 		index[st.Stage] = i
 	}
+	// QUIC and Noise are presented as one combined step in the UI.
+	index[transport.StageQUIC] = index[transport.StageNoise]
 	return Model{
 		session:  session,
 		steps:    steps,
