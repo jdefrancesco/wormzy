@@ -73,6 +73,7 @@ type options struct {
 	Code        string
 	DownloadDir string
 	Relay       string
+	TURN        string
 	RelayPin    string
 	Timeout     time.Duration
 	IdleTimeout time.Duration
@@ -172,6 +173,7 @@ func execute(opt options) error {
 		FilePath:         file,
 		Code:             code,
 		RelayAddr:        relayAddr,
+		TURNServers:      resolveTURNServers(opt.TURN),
 		RelayPin:         opt.RelayPin,
 		HandshakeTimeout: opt.Timeout,
 		IdleTimeout:      opt.IdleTimeout,
@@ -313,6 +315,7 @@ func parseInfo(args []string) (options, error) {
 	fs := flag.NewFlagSet("info", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opt.Relay, "relay", "", "override mailbox/rendezvous endpoint to check")
+	fs.StringVar(&opt.TURN, "turn", "", "comma-separated TURN URLs to display")
 	fs.Usage = printInfoUsage
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -329,6 +332,7 @@ func parseInfo(args []string) (options, error) {
 
 func registerSharedFlags(fs *flag.FlagSet, opt *options) {
 	fs.StringVar(&opt.Relay, "relay", "", "mailbox/rendezvous endpoint (defaults to WORMZY_RELAY_URL; legacy redis:// supported)")
+	fs.StringVar(&opt.TURN, "turn", "", "comma-separated TURN URLs (or WORMZY_TURN_URLS)")
 	fs.StringVar(&opt.RelayPin, "relay-pin", "", "base64(SHA256(SPKI)) pin for rendezvous TLS")
 	fs.DurationVar(&opt.Timeout, "timeout", 90*time.Second, "handshake timeout before giving up on pairing")
 	fs.DurationVar(&opt.IdleTimeout, "idle-timeout", 5*time.Minute, "max idle time after pairing before aborting a stalled transfer")
@@ -367,6 +371,7 @@ func printRecvUsage() {
 
 func printSharedFlags() {
 	fmt.Println(formatFlagLine("--relay", "mailbox/rendezvous endpoint (defaults to env WORMZY_RELAY_URL)"))
+	fmt.Println(formatFlagLine("--turn", "comma-separated TURN URLs (defaults to env WORMZY_TURN_URLS)"))
 	fmt.Println(formatFlagLine("--relay-pin", "base64(SHA256(SPKI)) pin for rendezvous TLS"))
 	fmt.Println(formatFlagLine("--timeout", "handshake timeout before giving up on pairing (default 1m30s)"))
 	fmt.Println(formatFlagLine("--idle-timeout", "max idle time after pairing before aborting (default 5m0s)"))
@@ -381,6 +386,7 @@ func printInfoUsage() {
 	fmt.Println()
 	fmt.Println(usageHeadingStyle.Render("Flags"))
 	fmt.Println(formatFlagLine("--relay", "override mailbox/rendezvous endpoint to probe"))
+	fmt.Println(formatFlagLine("--turn", "comma-separated TURN URLs (or use env WORMZY_TURN_URLS)"))
 }
 
 func formatFlagLine(name, desc string) string {
@@ -389,13 +395,17 @@ func formatFlagLine(name, desc string) string {
 
 func runInfo(opt options) error {
 	relay := resolveRelay(opt.Relay)
+	turns := resolveTURNServers(opt.TURN)
 	fmt.Println(usageHeadingStyle.Render("Mailbox probe"))
 	env := os.Getenv("WORMZY_RELAY_URL")
 	if env == "" {
 		env = "(not set)"
 	}
+	turnEnv := formatTURNServerSummary(resolveTURNServers(""))
 	fmt.Println(formatFlagLine("Resolved mailbox", relay))
 	fmt.Println(formatFlagLine("WORMZY_RELAY_URL", env))
+	fmt.Println(formatFlagLine("TURN servers", formatTURNServerSummary(turns)))
+	fmt.Println(formatFlagLine("WORMZY_TURN_URLS", turnEnv))
 	if err := probeRelay(relay); err != nil {
 		fmt.Println(formatFlagLine("Status", fmt.Sprintf("unreachable (%v)", err)))
 		return err
@@ -553,6 +563,67 @@ func resolveRelay(flagValue string) string {
 		return cfg
 	}
 	return transport.DefaultRelay()
+}
+
+func resolveTURNServers(flagValue string) []string {
+	raw := strings.TrimSpace(flagValue)
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv("WORMZY_TURN_URLS"))
+	}
+	if raw == "" {
+		return nil
+	}
+	// Allow operators to pass either comma/semicolon lists or whitespace-separated values.
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		switch r {
+		case ',', ';', ' ', '\n', '\t':
+			return true
+		default:
+			return false
+		}
+	})
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, ok := seen[part]; ok {
+			continue
+		}
+		// Deduplicate exact entries to avoid duplicate candidate gathering work.
+		seen[part] = struct{}{}
+		out = append(out, part)
+	}
+	return out
+}
+
+func formatTURNServerSummary(servers []string) string {
+	if len(servers) == 0 {
+		return "(none)"
+	}
+	redacted := make([]string, 0, len(servers))
+	for _, server := range servers {
+		redacted = append(redacted, redactCredentialHost(server))
+	}
+	return strings.Join(redacted, ", ")
+}
+
+func redactCredentialHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	at := strings.LastIndex(raw, "@")
+	if at == -1 {
+		return raw
+	}
+	colon := strings.Index(raw, ":")
+	if colon == -1 || colon > at {
+		return "***@" + raw[at+1:]
+	}
+	return raw[:colon+1] + "***@" + raw[at+1:]
 }
 
 // relayFromConfig reads an optional relay override from config files.

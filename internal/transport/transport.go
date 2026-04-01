@@ -50,6 +50,7 @@ const (
 	defaultTransferIdleTO = 5 * time.Minute
 	relayFallbackDelay    = 4 * time.Second
 	relayRetryDelay       = 3 * time.Second
+	relayAttemptTimeout   = 6 * time.Second
 
 	// Wire-format sizing limits.
 	maxUint16PayloadLen = (1 << 16) - 1
@@ -62,12 +63,15 @@ const (
 
 // Config controls how a Wormzy transfer session behaves.
 type Config struct {
-	Mode             string
-	FilePath         string
-	Code             string
-	RelayAddr        string
-	RelayPin         string
-	STUNServers      []string
+	Mode        string
+	FilePath    string
+	Code        string
+	RelayAddr   string
+	RelayPin    string
+	STUNServers []string
+	// TURNServers holds TURN/STUN URI strings used by ICE (for example:
+	// "turn:user:pass@turn.example.com:3478?transport=udp").
+	TURNServers      []string
 	HandshakeTimeout time.Duration
 	IdleTimeout      time.Duration
 	Loopback         bool
@@ -150,7 +154,10 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 	defer udpConn.Close()
 	reporter.Logf("udp/listen %s", udpConn.LocalAddr())
 
-	self := rendezvous.SelfInfo{Local: localEndpoint(udpConn)}
+	self := rendezvous.SelfInfo{
+		Local:    localEndpoint(udpConn),
+		Features: []string{featureICEv1},
+	}
 	if cfg.Loopback {
 		if addr, ok := udpConn.LocalAddr().(*net.UDPAddr); ok {
 			self.Local = net.JoinHostPort("127.0.0.1", strconv.Itoa(addr.Port))
@@ -243,6 +250,76 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 			reporter.Logf("report stats failed: %v", err)
 		}
 	}()
+
+	if !cfg.Loopback {
+		reporter.Stage(StageQUIC, StageStateRunning, "ice connectivity checks")
+		iceSession, iceErr := attemptICEQUICSession(ctx, cfg, mbox, reporter, peer)
+		switch {
+		case iceErr == nil && iceSession != nil:
+			defer iceSession.cleanup()
+			stats.Candidate = iceSession.candidate.Type
+			stats.Transport = transportLabelForCandidate(iceSession.candidate)
+			stats.DirectOutcome = "won"
+			stats.DirectSummary = fmt.Sprintf("%s@%s=won", iceSession.candidate.Type, iceSession.candidate.Addr)
+			reporter.Logf("direct race outcome=%s details=%s", stats.DirectOutcome, stats.DirectSummary)
+			if iceSession.initiated {
+				reporter.Logf("dialed QUIC peer via ICE %s", iceSession.candidate.Addr)
+				reporter.Stage(StageQUIC, StageStateDone, iceSession.candidate.Addr)
+			} else {
+				reporter.Logf("accepted QUIC connection via ICE from %s", iceSession.conn.RemoteAddr())
+				reporter.Stage(StageQUIC, StageStateDone, iceSession.conn.RemoteAddr().String())
+			}
+
+			reporter.Stage(StageNoise, StageStateRunning, "noise handshake")
+			fileKey, sas, err := runNoiseOverQUIC(iceSession.conn, iceSession.initiated, psk)
+			if err != nil {
+				if stats.Transport == "p2p" {
+					stats.DirectOutcome = "noise-failed"
+				}
+				reporter.Stage(StageNoise, StageStateError, err.Error())
+				return nil, err
+			}
+			reporter.Logf("noise handshake SAS %s", sas)
+			reporter.Stage(StageNoise, StageStateDone, fmt.Sprintf("confirm SAS %s", sas))
+
+			res = &Result{Code: code, Peer: peer, Mode: cfg.Mode}
+			res.Transport = stats.Transport
+			res.Candidate = stats.Candidate
+
+			switch cfg.Mode {
+			case "send":
+				reporter.Stage(StageTransfer, StageStateRunning, "streaming file")
+				sum, size, err := sendFileEncrypted(iceSession.conn, cfg.FilePath, fileKey, cfg.IdleTimeout, reporter)
+				if err != nil {
+					reporter.Stage(StageTransfer, StageStateError, err.Error())
+					return nil, err
+				}
+				res.FilePath = cfg.FilePath
+				res.FileSize = size
+				res.FileHash = hex.EncodeToString(sum)
+				reporter.Logf("transfer complete")
+				reporter.Stage(StageTransfer, StageStateDone, "file sent")
+			case "recv":
+				reporter.Stage(StageTransfer, StageStateRunning, "receiving file")
+				path, sum, size, err := receiveFile(iceSession.conn, fileKey, cfg.DownloadDir, cfg.IdleTimeout, reporter)
+				if err != nil {
+					reporter.Stage(StageTransfer, StageStateError, err.Error())
+					return nil, err
+				}
+				res.FilePath = path
+				res.FileSize = size
+				res.FileHash = hex.EncodeToString(sum)
+				reporter.Logf("saved file to %s", path)
+				reporter.Stage(StageTransfer, StageStateDone, path)
+			}
+
+			return res, nil
+		case errors.Is(iceErr, errICESkipped):
+			reporter.Logf("ice/skipped peer does not advertise %s", featureICEv1)
+		case iceErr != nil:
+			reporter.Logf("ice/failed %v (continuing legacy punch path)", iceErr)
+		}
+	}
 
 	var directTargets []directTarget
 	for _, cand := range directCandidates {
@@ -353,6 +430,9 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		}
 		for i, target := range directTargets {
 			launchDial(target, baseDelay+700*time.Millisecond+time.Duration(i)*120*time.Millisecond, 2)
+		}
+		for i, target := range directTargets {
+			launchDial(target, baseDelay+1500*time.Millisecond+time.Duration(i)*120*time.Millisecond, 3)
 		}
 	}
 
@@ -552,12 +632,14 @@ waitLoop:
 			relayInFlight = true
 			scheduleRelayAttempt(relayRetryDelay)
 			go func() {
-				rConn, rTransport, err := dialRelay(ctxConn, relayCand.Addr, cfg)
+				attemptCtx, cancel := context.WithTimeout(ctxConn, relayAttemptTimeout)
+				defer cancel()
+				rConn, rTransport, err := dialRelay(attemptCtx, relayCand.Addr, cfg)
 				if err != nil {
 					relayResCh <- relayResult{err: err}
 					return
 				}
-				if err := registerRelay(ctxConn, rConn, code, cfg.Mode, psk); err != nil {
+				if err := registerRelay(attemptCtx, rConn, code, cfg.Mode, psk); err != nil {
 					_ = rConn.CloseWithError(0, err.Error())
 					relayResCh <- relayResult{err: err}
 					return
@@ -764,6 +846,22 @@ func (cfg Config) stunServers() []string {
 	r := mrand.New(src)
 	r.Shuffle(len(list), func(i, j int) { list[i], list[j] = list[j], list[i] })
 	return list
+}
+
+func (cfg Config) turnServers() []string {
+	if len(cfg.TURNServers) == 0 {
+		return nil
+	}
+	// Keep ordering stable so admins can prioritize TURN pools explicitly.
+	out := make([]string, 0, len(cfg.TURNServers))
+	for _, v := range cfg.TURNServers {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 // DefaultRelay returns the compiled-in rendezvous Redis endpoint.

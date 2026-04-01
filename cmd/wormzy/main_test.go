@@ -50,6 +50,28 @@ func TestParseCLI_SendHelp_PrintsUsageOnce(t *testing.T) {
 	}
 }
 
+func TestResolveTURNServers_FlagOverridesEnv(t *testing.T) {
+	t.Setenv("WORMZY_TURN_URLS", "turn:env.example.com:3478?transport=udp")
+	got := resolveTURNServers("turn:flag.example.com:3478?transport=udp")
+	if len(got) != 1 || got[0] != "turn:flag.example.com:3478?transport=udp" {
+		t.Fatalf("unexpected turn servers from flag: %#v", got)
+	}
+}
+
+func TestResolveTURNServers_EnvListDedupes(t *testing.T) {
+	t.Setenv(
+		"WORMZY_TURN_URLS",
+		"turn:a.example.com:3478?transport=udp, turn:b.example.com:3478?transport=udp ; turn:a.example.com:3478?transport=udp",
+	)
+	got := resolveTURNServers("")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 deduped servers, got %#v", got)
+	}
+	if got[0] != "turn:a.example.com:3478?transport=udp" || got[1] != "turn:b.example.com:3478?transport=udp" {
+		t.Fatalf("unexpected parsed server list: %#v", got)
+	}
+}
+
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 

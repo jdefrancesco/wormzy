@@ -1,4 +1,5 @@
 junk
+bin/*
 test.bin
 ss.png
 .DS_Store

@@ -69,6 +69,7 @@ type SelfInfo struct {
 	Public     string      `json:"public"`
 	Local      string      `json:"local"`
 	Candidates []Candidate `json:"candidates,omitempty"`
+	Features   []string    `json:"features,omitempty"`
 }
 
 type message struct {
