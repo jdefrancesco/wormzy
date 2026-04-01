@@ -85,6 +85,11 @@ type Result struct {
 	Candidate string
 }
 
+type directTarget struct {
+	cand rendezvous.Candidate
+	addr *net.UDPAddr
+}
+
 // Reporter receives human-readable log lines describing progress.
 type Stage string
 
@@ -155,8 +160,12 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		reporter.Stage(StageSTUN, StageStateDone, "loopback")
 	} else {
 		ctxStun, cancelStun := context.WithTimeout(ctx, cfg.HandshakeTimeout)
+		stunServers := cfg.stunServers()
+		if len(stunServers) > 0 {
+			reporter.Logf("stun/servers %s", strings.Join(stunServers, ", "))
+		}
 		reporter.Stage(StageSTUN, StageStateRunning, "probing reflexive address")
-		pub, err := stun.DiscoverOnConn(ctxStun, udpConn, cfg.stunServers(), 2*time.Second, 2)
+		pub, err := stun.DiscoverOnConn(ctxStun, udpConn, stunServers, 2*time.Second, 2)
 		cancelStun()
 		if err != nil {
 			reporter.Stage(StageSTUN, StageStateError, err.Error())
@@ -171,6 +180,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		}
 	}
 	self.Candidates = buildCandidates(self, cfg.Loopback, cfg.relayCandidateAddr())
+	reporter.Logf("candidates/self %s", formatCandidateList(self.Candidates))
 
 	mbox, err := newMailbox(ctx, cfg)
 	if err != nil {
@@ -191,6 +201,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		reporter.Stage(StageRendezvous, StageStateError, err.Error())
 		return nil, err
 	}
+	reporter.Logf("candidates/peer %s", formatCandidateList(peer.Candidates))
 	if len(directCandidates) > 0 {
 		first := directCandidates[0]
 		extra := ""
@@ -232,10 +243,6 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		}
 	}()
 
-	type directTarget struct {
-		cand rendezvous.Candidate
-		addr *net.UDPAddr
-	}
 	var directTargets []directTarget
 	for _, cand := range directCandidates {
 		peerUDP, err := net.ResolveUDPAddr("udp4", cand.Addr)
@@ -244,6 +251,12 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 			continue
 		}
 		directTargets = append(directTargets, directTarget{cand: cand, addr: peerUDP})
+	}
+	if len(directTargets) > 0 {
+		reporter.Logf("direct/targets %s", formatDirectTargets(directTargets))
+	}
+	if relayCand != nil {
+		reporter.Logf("relay/candidate %s (%s)", relayCand.Addr, relayCand.Type)
 	}
 	if len(directTargets) == 0 && relayCand == nil {
 		return nil, fmt.Errorf("peer did not advertise any dialable UDP candidates")
@@ -261,7 +274,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		punchWG.Add(1)
 		go func() {
 			defer punchWG.Done()
-			punchLoop(punchCtx, udpConn, punchTargets, stopPunch)
+			punchLoop(punchCtx, udpConn, punchTargets, stopPunch, reporter)
 		}()
 	}
 
@@ -304,21 +317,25 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 
 	// Accept path
 	go func() {
+		reporter.Logf("direct/accept waiting on %s", udpConn.LocalAddr())
 		conn, err := ln.Accept(ctxConn)
 		resCh <- quicResult{conn: conn, initiated: false, attempt: 0, err: err}
 	}()
 
 	launchDial := func(target directTarget, delay time.Duration, attempt int) {
 		go func() {
+			reporter.Logf("direct/dial-schedule target=%s type=%s attempt=%d delay=%s", target.addr.String(), target.cand.Type, attempt, delay)
 			if delay > 0 {
 				timer := time.NewTimer(delay)
 				select {
 				case <-ctxConn.Done():
 					timer.Stop()
+					reporter.Logf("direct/dial-cancel target=%s type=%s attempt=%d", target.addr.String(), target.cand.Type, attempt)
 					return
 				case <-timer.C:
 				}
 			}
+			reporter.Logf("direct/dial-start target=%s type=%s attempt=%d", target.addr.String(), target.cand.Type, attempt)
 			conn, err := quicTransport.Dial(ctxConn, target.addr, clientTLS, quicConf)
 			cand := target.cand
 			resCh <- quicResult{conn: conn, initiated: true, candidate: &cand, attempt: attempt, err: err}
@@ -1264,6 +1281,46 @@ func summarizeDirectRace(status map[string]string) string {
 	return strings.Join(parts, ",")
 }
 
+func formatCandidateList(cands []rendezvous.Candidate) string {
+	if len(cands) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(cands))
+	for _, cand := range cands {
+		typ := cand.Type
+		if typ == "" {
+			typ = "unknown"
+		}
+		proto := cand.Proto
+		if proto == "" {
+			proto = "udp"
+		}
+		parts = append(parts, fmt.Sprintf("%s/%s@%s(p=%d)", typ, proto, cand.Addr, cand.Priority))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func formatDirectTargets(targets []directTarget) string {
+	if len(targets) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if target.addr == nil {
+			continue
+		}
+		typ := target.cand.Type
+		if typ == "" {
+			typ = "unknown"
+		}
+		parts = append(parts, fmt.Sprintf("%s@%s", typ, target.addr.String()))
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ", ")
+}
+
 // deriveSAS produces a short authentication string for human verification, mixing the
 // Noise transcript with the PAKE-derived key.
 func deriveSAS(transcript []byte, psk []byte) string {
@@ -1273,22 +1330,89 @@ func deriveSAS(transcript []byte, psk []byte) string {
 	return fmt.Sprintf("%04d-%04d", hi, lo)
 }
 
-func punchLoop(ctx context.Context, conn *net.UDPConn, peers []*net.UDPAddr, stop <-chan struct{}) {
-	ticker := time.NewTicker(150 * time.Millisecond)
+func punchLoop(ctx context.Context, conn *net.UDPConn, peers []*net.UDPAddr, stop <-chan struct{}, rep Reporter) {
+	if conn == nil || len(peers) == 0 {
+		return
+	}
+	interval := 150 * time.Millisecond
+	ticker := time.NewTicker(interval)
+	heartbeat := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
+	defer heartbeat.Stop()
+
+	targets := make([]*net.UDPAddr, 0, len(peers))
+	seen := make(map[string]struct{}, len(peers))
+	for _, peer := range peers {
+		if peer == nil {
+			continue
+		}
+		key := peer.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		targets = append(targets, peer)
+	}
+	if len(targets) == 0 {
+		return
+	}
+
+	started := time.Now()
+	if rep != nil {
+		var peerList []string
+		for _, target := range targets {
+			peerList = append(peerList, target.String())
+		}
+		rep.Logf("punch/start local=%s targets=[%s] interval=%s", conn.LocalAddr(), strings.Join(peerList, ","), interval)
+	}
+
+	var rounds int64
+	var sent int64
+	var errs int64
 	msg := []byte("punch")
+	sendRound := func() {
+		rounds++
+		for _, peer := range targets {
+			if _, err := conn.WriteToUDP(msg, peer); err != nil {
+				errs++
+				continue
+			}
+			sent++
+		}
+	}
+
+	// Send one immediate round before the first ticker edge.
+	sendRound()
 	for {
 		select {
 		case <-stop:
+			if rep != nil {
+				rep.Logf(
+					"punch/stop reason=quic-up rounds=%d packets=%d errs=%d elapsed=%s",
+					rounds,
+					sent,
+					errs,
+					time.Since(started).Round(100*time.Millisecond),
+				)
+			}
 			return
 		case <-ctx.Done():
+			if rep != nil {
+				rep.Logf(
+					"punch/stop reason=%v rounds=%d packets=%d errs=%d elapsed=%s",
+					ctx.Err(),
+					rounds,
+					sent,
+					errs,
+					time.Since(started).Round(100*time.Millisecond),
+				)
+			}
 			return
 		case <-ticker.C:
-			for _, peer := range peers {
-				if peer == nil {
-					continue
-				}
-				_, _ = conn.WriteToUDP(msg, peer)
+			sendRound()
+		case <-heartbeat.C:
+			if rep != nil {
+				rep.Logf("punch/heartbeat rounds=%d packets=%d errs=%d", rounds, sent, errs)
 			}
 		}
 	}
