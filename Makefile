@@ -3,12 +3,13 @@ GOBUILD=$(GOCMD) build
 GOCLEAN=$(GOCMD) clean
 GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
+BIN_DIR=bin
 
 # packages to operate on (exclude the mvp package)
 PACKAGES := $(shell $(GOCMD) list ./... | grep -v "/mvp$$")
 GOSEC_DIRS := $(shell $(GOCMD) list -f '{{.Dir}}' ./... | grep -v "/mvp$$")
 
-DEFAULT_BINARY=wormzy
+DEFAULT_BINARY=$(BIN_DIR)/wormzy
 BINARIES := wormzy rendezvous stuncheck mailbox dashboard relay
 
 all: test build 
@@ -24,13 +25,20 @@ deploy: build
 	-@sudo systemctl restart wormzy-relay.service
 
 debug:
+	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) -o $(DEFAULT_BINARY) -gcflags "all=-N -l" -v ./cmd/wormzy
 
 build:
 # 	gosec -exclude=G104,G307 $(GOSEC_DIRS)
+	@mkdir -p $(BIN_DIR)
 	@for bin in $(BINARIES); do \
-		$(GOBUILD) -o $$bin -v ./cmd/$$bin ; \
+		$(GOBUILD) -o $(BIN_DIR)/$$bin -v ./cmd/$$bin ; \
 	done
+
+.PHONY: wormzy
+wormzy:
+	@mkdir -p $(BIN_DIR)
+	$(GOBUILD) -o $(BIN_DIR)/wormzy -v ./cmd/wormzy
 
 test:
 	$(GOTEST) -v $(PACKAGES)
@@ -54,7 +62,7 @@ test-all: test-core test-transport test-stun
 install:
 	@for bin in $(BINARIES); do \
 		tmp="/usr/local/bin/.$$bin.tmp" ; \
-		cp ./$$bin "$$tmp" && chmod 0755 "$$tmp" && mv "$$tmp" /usr/local/bin/$$bin ; \
+		cp ./$(BIN_DIR)/$$bin "$$tmp" && chmod 0755 "$$tmp" && mv "$$tmp" /usr/local/bin/$$bin ; \
 	done
 
 
@@ -65,7 +73,7 @@ gosec:
 .PHONY: clean
 clean:
 	$(GOCLEAN)
-	rm -f $(BINARIES)
+	rm -rf $(BIN_DIR)
 
 
 .PHONY: sec-lint
