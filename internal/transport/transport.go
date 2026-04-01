@@ -362,6 +362,17 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 
 	var quicConn *quic.Conn
 	initiated := cfg.Mode == "recv"
+	preferInitiated := cfg.Mode == "recv" // recv prefers dial, send prefers accept
+	preferredPath := "accept"
+	if preferInitiated {
+		preferredPath = "dial"
+	}
+	pathKind := func(v bool) string {
+		if v {
+			return "dial"
+		}
+		return "accept"
+	}
 	usedCandidate := pickFallbackDirectCandidate(dialableCandidates)
 	var firstErr error
 	relayAttempted := false
@@ -379,6 +390,49 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 	}
 	fallbackTimer := time.NewTimer(fallbackDelay)
 	defer fallbackTimer.Stop()
+	const nonPreferredGrace = 650 * time.Millisecond
+	var provisional *quicResult
+	var provisionalTimer *time.Timer
+	var provisionalTimerCh <-chan time.Time
+	stopProvisionalTimer := func() {
+		if provisionalTimer == nil {
+			return
+		}
+		if !provisionalTimer.Stop() {
+			select {
+			case <-provisionalTimer.C:
+			default:
+			}
+		}
+		provisionalTimer = nil
+		provisionalTimerCh = nil
+	}
+	closeDirectConn := func(conn *quic.Conn, reason string) {
+		if conn == nil {
+			return
+		}
+		_ = conn.CloseWithError(0, reason)
+	}
+	adoptDirect := func(res quicResult) {
+		quicConn = res.conn
+		initiated = res.initiated
+		if res.initiated && res.candidate != nil {
+			usedCandidate = *res.candidate
+			key := usedCandidate.Type + "@" + usedCandidate.Addr
+			directStatus[key] = "won"
+			directOutcome = "won"
+			reporter.Logf("direct race won on %s (%s) attempt=%d", usedCandidate.Addr, usedCandidate.Type, res.attempt)
+			return
+		}
+		matched := classifyCandidateByRemote(res.conn.RemoteAddr(), dialableCandidates)
+		if matched != nil {
+			usedCandidate = *matched
+			key := matched.Type + "@" + matched.Addr
+			directStatus[key] = "won"
+		}
+		directOutcome = "won"
+		reporter.Logf("direct race accepted from %s", res.conn.RemoteAddr())
+	}
 
 	// Sloppy NAT punching p2p-race logic goes here. If we miserably fail fallback and just use relay.
 waitLoop:
@@ -386,25 +440,35 @@ waitLoop:
 		select {
 		case res := <-resCh:
 			if res.err == nil && res.conn != nil {
-				quicConn = res.conn
-				initiated = res.initiated
-				if res.initiated && res.candidate != nil {
-					usedCandidate = *res.candidate
-					key := usedCandidate.Type + "@" + usedCandidate.Addr
-					directStatus[key] = "won"
-					directOutcome = "won"
-					reporter.Logf("direct race won on %s (%s) attempt=%d", usedCandidate.Addr, usedCandidate.Type, res.attempt)
-				} else {
-					matched := classifyCandidateByRemote(res.conn.RemoteAddr(), dialableCandidates)
-					if matched != nil {
-						usedCandidate = *matched
-						key := matched.Type + "@" + matched.Addr
-						directStatus[key] = "won"
+				// To avoid split-brain (both peers choosing their own dialed conn),
+				// prefer a deterministic path by role and only fall back to the first
+				// non-preferred success after a short grace window.
+				if res.initiated == preferInitiated {
+					stopProvisionalTimer()
+					if provisional != nil && provisional.conn != nil && provisional.conn != res.conn {
+						closeDirectConn(provisional.conn, "preferred direct path selected")
 					}
-					directOutcome = "won"
-					reporter.Logf("direct race accepted from %s", res.conn.RemoteAddr())
+					provisional = nil
+					adoptDirect(res)
+					break waitLoop
 				}
-				break waitLoop
+				if provisional == nil {
+					prov := res
+					provisional = &prov
+					provisionalTimer = time.NewTimer(nonPreferredGrace)
+					provisionalTimerCh = provisionalTimer.C
+					reporter.Logf(
+						"direct race provisional path=%s waiting=%s for preferred=%s",
+						pathKind(res.initiated),
+						nonPreferredGrace,
+						preferredPath,
+					)
+					continue
+				}
+				// Extra success while waiting on preferred path; close it.
+				closeDirectConn(res.conn, "alternate direct path discarded")
+				reporter.Logf("direct race extra %s path discarded", pathKind(res.initiated))
+				continue
 			}
 			if res.candidate != nil {
 				key := res.candidate.Type + "@" + res.candidate.Addr
@@ -414,6 +478,19 @@ waitLoop:
 			}
 			if firstErr == nil {
 				firstErr = res.err
+			}
+		case <-provisionalTimerCh:
+			stopProvisionalTimer()
+			if provisional != nil {
+				reporter.Logf(
+					"direct race selecting provisional path=%s after waiting %s for preferred=%s",
+					pathKind(provisional.initiated),
+					nonPreferredGrace,
+					preferredPath,
+				)
+				adoptDirect(*provisional)
+				provisional = nil
+				break waitLoop
 			}
 		case <-fallbackTimer.C:
 			if relayCand != nil && !relayAttempted {
@@ -441,6 +518,11 @@ waitLoop:
 		case relay := <-relayResCh:
 			relayInFlight = false
 			if relay.err == nil && relay.conn != nil {
+				stopProvisionalTimer()
+				if provisional != nil {
+					closeDirectConn(provisional.conn, "relay fallback selected")
+					provisional = nil
+				}
 				quicConn = relay.conn
 				relayTransport = relay.transport
 				initiated = cfg.Mode == "send"
@@ -455,6 +537,17 @@ waitLoop:
 				firstErr = relay.err
 			}
 		case <-ctxConn.Done():
+			if provisional != nil && provisional.conn != nil {
+				stopProvisionalTimer()
+				reporter.Logf(
+					"direct race selecting provisional path=%s because preferred=%s did not arrive in time",
+					pathKind(provisional.initiated),
+					preferredPath,
+				)
+				adoptDirect(*provisional)
+				provisional = nil
+				break waitLoop
+			}
 			if quicConn != nil {
 				break waitLoop
 			}
