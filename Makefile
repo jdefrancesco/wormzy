@@ -4,6 +4,8 @@ GOCLEAN=$(GOCMD) clean
 GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 BIN_DIR=bin
+SYSTEMD_DIR=/etc/systemd/system
+SYSTEMD_UNITS := wormzy-mailbox.service wormzy-relay.service
 
 # packages to operate on (exclude the mvp package)
 PACKAGES := $(shell $(GOCMD) list ./... | grep -v "/mvp$$")
@@ -14,15 +16,12 @@ BINARIES := wormzy rendezvous stuncheck mailbox dashboard relay
 
 all: test build 
 
-deploy: build
-	-@sudo systemctl stop wormzy-mailbox.service
-	-@sudo systemctl stop wormzy-rendezvous.service
-	-@sudo systemctl stop wormzy-relay.service
-	@$(MAKE) install
+deploy: install install-units
 	-@sudo systemctl daemon-reload
 	-@sudo systemctl restart wormzy-mailbox.service
 	-@sudo systemctl restart wormzy-rendezvous.service
 	-@sudo systemctl restart wormzy-relay.service
+	-@sudo systemctl --no-pager --full status wormzy-mailbox.service wormzy-relay.service
 
 debug:
 	@mkdir -p $(BIN_DIR)
@@ -59,12 +58,19 @@ test-transport:
 test-all: test-core test-transport test-stun
 
 .PHONY: install
-install:
+install: build
 	@for bin in $(BINARIES); do \
 		tmp="/usr/local/bin/.$$bin.tmp" ; \
-		cp ./$(BIN_DIR)/$$bin "$$tmp" && chmod 0755 "$$tmp" && mv "$$tmp" /usr/local/bin/$$bin ; \
+		sudo cp ./$(BIN_DIR)/$$bin "$$tmp" && sudo chmod 0755 "$$tmp" && sudo mv "$$tmp" /usr/local/bin/$$bin ; \
 	done
 
+.PHONY: install-units
+install-units:
+	@for unit in $(SYSTEMD_UNITS); do \
+		if [ -f ./deploy/systemd/$$unit ]; then \
+			sudo cp ./deploy/systemd/$$unit $(SYSTEMD_DIR)/$$unit ; \
+		fi ; \
+	done
 
 .PHONY: gosec
 gosec:

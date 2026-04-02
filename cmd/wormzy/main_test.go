@@ -72,6 +72,14 @@ func TestResolveTURNServers_EnvListDedupes(t *testing.T) {
 	}
 }
 
+func TestEffectiveTURNServers_UsesDefaultFromRelay(t *testing.T) {
+	t.Setenv("WORMZY_TURN_URLS", "")
+	got := effectiveTURNServers("", "https://relay.example.com")
+	if len(got) != 1 || got[0] != "relay.example.com:3479" {
+		t.Fatalf("unexpected effective turn defaults: %#v", got)
+	}
+}
+
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 

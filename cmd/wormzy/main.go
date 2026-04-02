@@ -173,7 +173,7 @@ func execute(opt options) error {
 		FilePath:         file,
 		Code:             code,
 		RelayAddr:        relayAddr,
-		TURNServers:      resolveTURNServers(opt.TURN),
+		TURNServers:      effectiveTURNServers(opt.TURN, relayAddr),
 		RelayPin:         opt.RelayPin,
 		HandshakeTimeout: opt.Timeout,
 		IdleTimeout:      opt.IdleTimeout,
@@ -332,7 +332,7 @@ func parseInfo(args []string) (options, error) {
 
 func registerSharedFlags(fs *flag.FlagSet, opt *options) {
 	fs.StringVar(&opt.Relay, "relay", "", "mailbox/rendezvous endpoint (defaults to WORMZY_RELAY_URL; legacy redis:// supported)")
-	fs.StringVar(&opt.TURN, "turn", "", "comma-separated TURN URLs (or WORMZY_TURN_URLS)")
+	fs.StringVar(&opt.TURN, "turn", "", "comma-separated TURN URLs (defaults to relay host UDP/3479 or WORMZY_TURN_URLS)")
 	fs.StringVar(&opt.RelayPin, "relay-pin", "", "base64(SHA256(SPKI)) pin for rendezvous TLS")
 	fs.DurationVar(&opt.Timeout, "timeout", 90*time.Second, "handshake timeout before giving up on pairing")
 	fs.DurationVar(&opt.IdleTimeout, "idle-timeout", 5*time.Minute, "max idle time after pairing before aborting a stalled transfer")
@@ -371,7 +371,7 @@ func printRecvUsage() {
 
 func printSharedFlags() {
 	fmt.Println(formatFlagLine("--relay", "mailbox/rendezvous endpoint (defaults to env WORMZY_RELAY_URL)"))
-	fmt.Println(formatFlagLine("--turn", "comma-separated TURN URLs (defaults to env WORMZY_TURN_URLS)"))
+	fmt.Println(formatFlagLine("--turn", "comma-separated TURN URLs (defaults to relay host UDP/3479 or env WORMZY_TURN_URLS)"))
 	fmt.Println(formatFlagLine("--relay-pin", "base64(SHA256(SPKI)) pin for rendezvous TLS"))
 	fmt.Println(formatFlagLine("--timeout", "handshake timeout before giving up on pairing (default 1m30s)"))
 	fmt.Println(formatFlagLine("--idle-timeout", "max idle time after pairing before aborting (default 5m0s)"))
@@ -395,7 +395,7 @@ func formatFlagLine(name, desc string) string {
 
 func runInfo(opt options) error {
 	relay := resolveRelay(opt.Relay)
-	turns := resolveTURNServers(opt.TURN)
+	turns := effectiveTURNServers(opt.TURN, relay)
 	fmt.Println(usageHeadingStyle.Render("Mailbox probe"))
 	env := os.Getenv("WORMZY_RELAY_URL")
 	if env == "" {
@@ -563,6 +563,13 @@ func resolveRelay(flagValue string) string {
 		return cfg
 	}
 	return transport.DefaultRelay()
+}
+
+func effectiveTURNServers(flagValue, relayAddr string) []string {
+	if turns := resolveTURNServers(flagValue); len(turns) > 0 {
+		return turns
+	}
+	return transport.DefaultTURNServers(relayAddr)
 }
 
 func resolveTURNServers(flagValue string) []string {

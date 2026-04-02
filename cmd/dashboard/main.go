@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -201,7 +202,8 @@ func renderSummary(metrics *transport.RelayMetrics, loading bool) string {
 func renderSessionPanels(metrics *transport.RelayMetrics) string {
 	active := renderSessionList("Active sessions", metrics.Active, metrics.Generated, true)
 	recent := renderSessionList("Recent transfers", metrics.Recent, metrics.Generated, false)
-	return lipgloss.JoinVertical(lipgloss.Left, active, recent)
+	debug := renderDebugPanel(metrics)
+	return lipgloss.JoinVertical(lipgloss.Left, active, recent, debug)
 }
 
 func renderSessionList(title string, sessions []transport.SessionSnapshot, ref time.Time, showTTL bool) string {
@@ -237,6 +239,97 @@ func renderSessionRow(sess transport.SessionSnapshot, ref time.Time, showTTL boo
 		humanDuration(sess.Duration),
 		trailing,
 	)
+}
+
+func renderDebugPanel(metrics *transport.RelayMetrics) string {
+	lines := []string{
+		fmt.Sprintf("Direct outcomes  %s", summarizeCountMap(metrics.DirectOutcomeCount, 6)),
+		fmt.Sprintf("Candidates used  %s", summarizeCountMap(metrics.CandidateCount, 6)),
+		fmt.Sprintf("Failure causes   %s", summarizeCountMap(metrics.ErrorCount, 6)),
+	}
+	if len(metrics.RecentFailures) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, subtleStyle.Render("Recent failures"))
+		for i, sess := range metrics.RecentFailures {
+			if i >= 4 {
+				break
+			}
+			lines = append(lines, renderFailureRow(sess, metrics.Generated))
+		}
+	}
+	body := titleStyle.Render("Debug snapshot") + "\n" + strings.Join(lines, "\n")
+	return bubbleBoxStyle.Render(body)
+}
+
+func summarizeCountMap(counts map[string]int, limit int) string {
+	if len(counts) == 0 {
+		return subtleStyle.Render("(none)")
+	}
+	type bucket struct {
+		key   string
+		count int
+	}
+	items := make([]bucket, 0, len(counts))
+	for key, count := range counts {
+		if count <= 0 {
+			continue
+		}
+		items = append(items, bucket{key: key, count: count})
+	}
+	if len(items) == 0 {
+		return subtleStyle.Render("(none)")
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].count == items[j].count {
+			return items[i].key < items[j].key
+		}
+		return items[i].count > items[j].count
+	})
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		parts = append(parts, fmt.Sprintf("%s=%s", item.key, summaryValue(item.count)))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func renderFailureRow(sess transport.SessionSnapshot, ref time.Time) string {
+	when := humanDuration(sessionTrailing(sess, ref, false))
+	candidate := sess.Candidate
+	if candidate == "" {
+		candidate = "unknown"
+	}
+	outcome := sess.DirectOutcome
+	if outcome == "" {
+		outcome = "unknown"
+	}
+	errMsg := sess.Error
+	if errMsg == "" {
+		errMsg = "n/a"
+	}
+	errMsg = truncateMiddle(errMsg, 56)
+	return fmt.Sprintf(
+		"%s %s cand=%s outcome=%s err=%s",
+		sess.Code,
+		subtleStyle.Render(when+" ago"),
+		candidate,
+		outcome,
+		errMsg,
+	)
+}
+
+func truncateMiddle(v string, max int) string {
+	if max <= 0 || len(v) <= max {
+		return v
+	}
+	if max < 8 {
+		return v[:max]
+	}
+	head := (max - 3) / 2
+	tail := max - 3 - head
+	return v[:head] + "..." + v[len(v)-tail:]
 }
 
 func sessionTrailing(sess transport.SessionSnapshot, ref time.Time, showTTL bool) time.Duration {

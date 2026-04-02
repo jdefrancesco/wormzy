@@ -7,8 +7,9 @@ Wants=network-online.target
 Type=simple
 User=wormzy
 Group=wormzy
+Environment=WORMZY_RELAY_LISTEN=:3478
 EnvironmentFile=-/etc/wormzy/relay.env
-ExecStart=/usr/local/bin/relay -listen ${WORMZY_RELAY_LISTEN:-:3478}
+ExecStart=/usr/local/bin/relay -listen ${WORMZY_RELAY_LISTEN}
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=65535

@@ -15,6 +15,7 @@ const (
 	defaultMetricsPrefix = "wormzy"
 	maxActiveSessions    = 12
 	maxRecentSessions    = 12
+	maxRecentFailures    = 8
 )
 
 // MetricsCollector provides aggregated relay/session metrics out of Redis.
@@ -37,8 +38,12 @@ type RelayMetrics struct {
 	TotalBytes         int64
 	AvgDuration        time.Duration
 	AvgThroughputMBps  float64
+	DirectOutcomeCount map[string]int
+	CandidateCount     map[string]int
+	ErrorCount         map[string]int
 	Active             []SessionSnapshot
 	Recent             []SessionSnapshot
+	RecentFailures     []SessionSnapshot
 }
 
 // SessionSnapshot summarizes a single rendezvous session for dashboards.
@@ -92,7 +97,10 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 		return nil, fmt.Errorf("metrics collector not initialized")
 	}
 	report := &RelayMetrics{
-		Generated: time.Now(),
+		Generated:          time.Now(),
+		DirectOutcomeCount: make(map[string]int),
+		CandidateCount:     make(map[string]int),
+		ErrorCount:         make(map[string]int),
 	}
 	var totalDuration time.Duration
 	pattern := fmt.Sprintf("%s:sessions:*", mc.prefix)
@@ -132,6 +140,11 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 					}
 					report.Active = append(report.Active, snap)
 				} else {
+					candidate := normalizeMetricsLabel(sess.Stats.Candidate, "unknown")
+					report.CandidateCount[candidate]++
+					outcome := normalizeMetricsLabel(sess.Stats.DirectOutcome, "unknown")
+					report.DirectOutcomeCount[outcome]++
+
 					if sess.Stats.Completed {
 						report.CompletedSessions++
 						if strings.EqualFold(sess.Stats.Transport, "relay") {
@@ -143,6 +156,9 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 						totalDuration += time.Duration(sess.Stats.DurationMillis) * time.Millisecond
 					} else {
 						report.FailedSessions++
+						errKey := normalizeMetricsError(sess.Stats.Error)
+						report.ErrorCount[errKey]++
+						report.RecentFailures = append(report.RecentFailures, snap)
 					}
 					report.Recent = append(report.Recent, snap)
 				}
@@ -164,6 +180,12 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 	if len(report.Recent) > maxRecentSessions {
 		report.Recent = report.Recent[:maxRecentSessions]
 	}
+	sort.Slice(report.RecentFailures, func(i, j int) bool {
+		return report.RecentFailures[i].UpdatedAt.After(report.RecentFailures[j].UpdatedAt)
+	})
+	if len(report.RecentFailures) > maxRecentFailures {
+		report.RecentFailures = report.RecentFailures[:maxRecentFailures]
+	}
 	if report.CompletedSessions > 0 {
 		report.AvgDuration = totalDuration / time.Duration(report.CompletedSessions)
 		if report.AvgDuration > 0 {
@@ -172,6 +194,40 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 		}
 	}
 	return report, nil
+}
+
+func normalizeMetricsLabel(v, fallback string) string {
+	v = strings.TrimSpace(strings.ToLower(v))
+	if v == "" {
+		return fallback
+	}
+	return v
+}
+
+func normalizeMetricsError(errMsg string) string {
+	msg := strings.TrimSpace(strings.ToLower(errMsg))
+	if msg == "" {
+		return "unknown"
+	}
+	switch {
+	case strings.Contains(msg, "deadline exceeded"):
+		return "deadline exceeded"
+	case strings.Contains(msg, "timeout"):
+		return "timeout"
+	case strings.Contains(msg, "noise"):
+		return "noise error"
+	case strings.Contains(msg, "relay"):
+		return "relay error"
+	case strings.Contains(msg, "no usable transport candidates"):
+		return "no candidates"
+	}
+	if idx := strings.Index(msg, ":"); idx > 0 {
+		msg = msg[:idx]
+	}
+	if len(msg) > 64 {
+		msg = msg[:64] + "..."
+	}
+	return msg
 }
 
 func snapshotFromSession(sess *rendezvousSession, now time.Time) SessionSnapshot {
