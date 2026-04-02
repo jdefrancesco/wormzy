@@ -1,6 +1,6 @@
 # How Wormzy Works
 
-Wormzy is a peer-to-peer file sender built around three subsystems: the CLI/UI (`cmd/wormzy` and `internal/ui`), the rendezvous/transport layer (`internal/transport`), and an optional HTTP mailbox proxy (`cmd/mailbox`, `internal/transport/mailbox_*`). End users run exactly two binaries—`wormzy send <file>` and `wormzy recv`—while infrastructure hosts the mailbox proxy that fronts a managed Redis mailbox.
+**`Wormzy`** is a peer-to-peer file sender built around three subsystems: the CLI/UI (`cmd/wormzy` and `internal/ui`), the rendezvous/transport layer (`internal/transport`), and an optional HTTP mailbox proxy (`cmd/mailbox`, `internal/transport/mailbox_*`). End users run exactly two binaries—`wormzy send <file>` and `wormzy recv`—while infrastructure hosts the mailbox proxy that fronts a managed Redis mailbox.
 
 ## Session Flow
 
@@ -21,6 +21,23 @@ Wormzy is a peer-to-peer file sender built around three subsystems: the CLI/UI (
 - `-relay` (or `WORMZY_RELAY[_URL]`) selects Redis vs. HTTP relay.
 - `-timeout`, `-show-network`, `-log-file`, and `-dev-loopback` customize behavior.
 - `cmd/mailbox` runs as `wormzy-mailbox` on your infrastructure; point it at your managed Redis string.
+
+### NAT Traversal
+
+NAT Traversal is key to creating a secure P2P connection that data is sent over. NAT traversal is not guaranteed. Some configurations, like symmetric NAT, make *NAT Punching* difficult or impossible. When this happens `wormzy` is forced to fallback and use a relay. The general flow is as follows:
+
+1. Rendezvous server: exchanges candidates and tokens
+2. STUN: tells each peer its reflexive/public address
+3. UDP punching engine: probes all candidate pairs
+4. Connectivity checker: validates which path works
+5. Relay/TURN fallback: if no direct path works
+6. Encrypted transport via Noise/QUIC for file transfer
+
+#### Relevant RFCs
+
+- [ICE-PAC](https://datatracker.ietf.org/doc/html/rfc8863)
+- [STUN](https://datatracker.ietf.org/doc/html/rfc5389)
+- [ICE/NAT](https://datatracker.ietf.org/doc/html/rfc8445)
 
 ## TLDR
 
