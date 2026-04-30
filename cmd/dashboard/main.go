@@ -36,7 +36,7 @@ func main() {
 	defer collector.Close()
 
 	model := newDashboardModel(collector, *refresh)
-	if err := tea.NewProgram(model, tea.WithAltScreen()).Start(); err != nil {
+	if _, err := tea.NewProgram(model, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
