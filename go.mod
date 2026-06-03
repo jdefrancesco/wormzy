@@ -11,7 +11,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20
 	github.com/pion/ice/v2 v2.3.38
 	github.com/pion/stun v0.6.1
-	github.com/quic-go/quic-go v0.59.0
+	github.com/quic-go/quic-go v0.59.1
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/zeebo/blake3 v0.2.4
 	golang.org/x/crypto v0.48.0
