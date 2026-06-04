@@ -1,6 +1,6 @@
 module github.com/jdefrancesco/wormzy
 
-go 1.25.0
+go 1.26.4
 
 require (
 	filippo.io/cpace v0.0.0-20210101143347-24d601e2e469
