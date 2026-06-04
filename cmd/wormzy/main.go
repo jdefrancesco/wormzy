@@ -62,9 +62,9 @@ func ShowHeader() string {
 `
 
 	title := titleStyle.Render(logo)
-	subtitle := subtitleStyle.Render("secure peer-to-peer file transfer • noise + quic")
-
-	return boxStyle.Render(title + "\n" + subtitle)
+	subtitle := subtitleStyle.Render("secure p2p file tx/rx • noise • quic")
+	ver := subtitleStyle.Render(version)
+	return boxStyle.Render(title + "\n" + subtitle + "  -  " + ver)
 }
 
 type options struct {
