@@ -3,6 +3,7 @@ GOBUILD=$(GOCMD) build
 GOCLEAN=$(GOCMD) clean
 GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
+TEST_TIMEOUT ?= 60s
 BIN_DIR=bin
 SYSTEMD_DIR=/etc/systemd/system
 SYSTEMD_UNITS := wormzy-mailbox.service wormzy-relay.service
@@ -40,19 +41,19 @@ wormzy:
 	$(GOBUILD) -o $(BIN_DIR)/wormzy -v ./cmd/wormzy
 
 test:
-	$(GOTEST) -v $(PACKAGES)
+	$(GOTEST) -timeout $(TEST_TIMEOUT) -v $(PACKAGES)
 
 .PHONY: test-core
 test-core:
-	$(GOTEST) ./cmd/wormzy ./internal/ui ./internal/rendezvous ./internal/transport
+	$(GOTEST) -timeout $(TEST_TIMEOUT) ./cmd/wormzy ./internal/ui ./internal/rendezvous ./internal/transport
 
 .PHONY: test-stun
 test-stun:
-	$(GOTEST) -v ./internal/stun
+	$(GOTEST) -timeout $(TEST_TIMEOUT) -v ./internal/stun
 
 .PHONY: test-transport
 test-transport:
-	$(GOTEST) -v ./internal/transport
+	$(GOTEST) -timeout $(TEST_TIMEOUT) -v ./internal/transport
 
 .PHONY: test-all
 test-all: test-core test-transport test-stun

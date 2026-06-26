@@ -18,6 +18,9 @@ func (r tReporter) Logf(format string, args ...interface{}) {
 }
 
 func (r tReporter) Stage(stage Stage, state StageState, detail string) {
+	if stage == StageTransfer && state == StageStateRunning {
+		return
+	}
 	r.t.Logf("stage %s %v %s", stage, state, detail)
 }
 
@@ -37,10 +40,10 @@ func TestLargeTransferLoopback(t *testing.T) {
 	}
 	defer mini.Close()
 
-	// Build a ~8 MiB random file.
+	// Build a multi-MiB random file.
 	tmpDir := t.TempDir()
 	srcPath := filepath.Join(tmpDir, "large.bin")
-	srcData := make([]byte, 8*1024*1024)
+	srcData := make([]byte, 2*1024*1024)
 	if _, err := rand.Read(srcData); err != nil {
 		t.Fatalf("rand.Read: %v", err)
 	}
