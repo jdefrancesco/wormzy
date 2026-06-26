@@ -196,26 +196,39 @@ stop_pid() {
 }
 
 extract_code() {
-  local out_file="$1"
-  local line
-  line="$(grep -m1 -E "rendezvous assigned code " "$out_file" 2>/dev/null || true)"
-  if [[ -z "$line" ]]; then
-    return 1
-  fi
-  echo "${line##*rendezvous assigned code }"
+  local line file
+  for file in "$@"; do
+    line="$(grep -m1 -E "rendezvous assigned code |STAGE rendezvous running code " "$file" 2>/dev/null || true)"
+    if [[ -n "$line" ]]; then
+      case "$line" in
+        *"rendezvous assigned code "*)
+          echo "${line##*rendezvous assigned code }"
+          return 0
+          ;;
+        *"STAGE rendezvous running code "*)
+          echo "${line##*STAGE rendezvous running code }"
+          return 0
+          ;;
+      esac
+    fi
+  done
+  return 1
 }
 
 wait_for_code() {
-  local out_file="$1"
-  local timeout_s="$2"
+  local timeout_s="$1"
+  shift
   local deadline=$((SECONDS + timeout_s))
   while ((SECONDS < deadline)); do
     local code
-    if code="$(extract_code "$out_file")"; then
+    if code="$(extract_code "$@")"; then
       if [[ -n "$code" ]]; then
         echo "$code"
         return 0
       fi
+    fi
+    if grep -Eq " STAGE (stun|rendezvous|quic|noise|transfer) error |^error:" "$@" 2>/dev/null; then
+      return 2
     fi
     sleep 0.1
   done
@@ -290,8 +303,8 @@ for ((i = 1; i <= TRIALS; i++)); do
   send_pid=""
   recv_pid=""
 
-  send_cmd=("$WORMZY_BIN" send "$PAYLOAD_FILE" -relay "$RELAY" -log-file "$send_log")
-  recv_cmd_base=("$WORMZY_BIN" recv -relay "$RELAY" -download-dir "$trial_dir/recv" -log-file "$recv_log")
+  send_cmd=("$WORMZY_BIN" send "$PAYLOAD_FILE" -relay "$RELAY" -log-file "$send_log" -auto-exit)
+  recv_cmd_base=("$WORMZY_BIN" recv -relay "$RELAY" -download-dir "$trial_dir/recv" -log-file "$recv_log" -auto-exit)
   if [[ -n "$TURN_URLS" ]]; then
     send_cmd+=( -turn "$TURN_URLS" )
     recv_cmd_base+=( -turn "$TURN_URLS" )
@@ -301,8 +314,15 @@ for ((i = 1; i <= TRIALS; i++)); do
   send_pid=$!
 
   code=""
-  if ! code="$(wait_for_code "$send_out" "$CODE_TIMEOUT_S")"; then
-    echo "[trial $trial_id] FAIL: sender did not emit pairing code within ${CODE_TIMEOUT_S}s"
+  if code="$(wait_for_code "$CODE_TIMEOUT_S" "$send_out" "$send_log")"; then
+    :
+  else
+    code_status=$?
+    if [[ "$code_status" -eq 2 ]]; then
+      echo "[trial $trial_id] FAIL: sender failed before emitting pairing code; see $send_log"
+    else
+      echo "[trial $trial_id] FAIL: sender did not emit pairing code within ${CODE_TIMEOUT_S}s"
+    fi
     kill "$send_pid" >/dev/null 2>&1 || true
     wait "$send_pid" >/dev/null 2>&1 || true
     fail_count=$((fail_count + 1))

@@ -50,6 +50,24 @@ func TestParseCLI_SendHelp_PrintsUsageOnce(t *testing.T) {
 	}
 }
 
+func TestParseCLI_AutoExitSharedFlag(t *testing.T) {
+	sendOpt, err := parseCLI([]string{"send", "payload.bin", "--auto-exit"})
+	if err != nil {
+		t.Fatalf("parse send: %v", err)
+	}
+	if !sendOpt.AutoExit {
+		t.Fatalf("expected send --auto-exit to be enabled")
+	}
+
+	recvOpt, err := parseCLI([]string{"recv", "--auto-exit", "code-123"})
+	if err != nil {
+		t.Fatalf("parse recv: %v", err)
+	}
+	if !recvOpt.AutoExit {
+		t.Fatalf("expected recv --auto-exit to be enabled")
+	}
+}
+
 func TestResolveTURNServers_FlagOverridesEnv(t *testing.T) {
 	t.Setenv("WORMZY_TURN_URLS", "turn:env.example.com:3478?transport=udp")
 	got := resolveTURNServers("turn:flag.example.com:3478?transport=udp")

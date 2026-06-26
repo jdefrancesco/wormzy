@@ -21,6 +21,7 @@ type Session struct {
 	Code        string
 	DownloadDir string
 	ShowNetwork bool
+	AutoExit    bool
 }
 
 // DoneMsg notifies the UI that the transport run finished.
@@ -126,6 +127,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case msg.Err == nil:
 			m.err = nil
+			if m.session.AutoExit {
+				return m, tea.Quit
+			}
 			return m, nil
 		case errors.Is(msg.Err, context.Canceled):
 			m.err = nil

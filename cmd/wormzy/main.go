@@ -79,6 +79,7 @@ type options struct {
 	IdleTimeout time.Duration
 	DevLoopback bool
 	ShowNetwork bool
+	AutoExit    bool
 	LogFile     string
 }
 
@@ -192,6 +193,7 @@ func execute(opt options) error {
 		Relay:       relayAddr,
 		Code:        code,
 		ShowNetwork: opt.ShowNetwork,
+		AutoExit:    opt.AutoExit,
 		DownloadDir: downloadDir,
 	}
 	model := ui.NewModel(session)
@@ -338,6 +340,7 @@ func registerSharedFlags(fs *flag.FlagSet, opt *options) {
 	fs.DurationVar(&opt.IdleTimeout, "idle-timeout", 5*time.Minute, "max idle time after pairing before aborting a stalled transfer")
 	fs.BoolVar(&opt.DevLoopback, "dev-loopback", false, "use local addresses for testing")
 	fs.BoolVar(&opt.ShowNetwork, "show-network", false, "display relay/STUN diagnostics in the UI")
+	fs.BoolVar(&opt.AutoExit, "auto-exit", false, "exit automatically after a successful transfer")
 	fs.StringVar(&opt.LogFile, "log-file", "", "append detailed session logs to the given file")
 }
 
@@ -377,6 +380,7 @@ func printSharedFlags() {
 	fmt.Println(formatFlagLine("--idle-timeout", "max idle time after pairing before aborting (default 5m0s)"))
 	fmt.Println(formatFlagLine("--dev-loopback", "keep traffic on localhost for demos"))
 	fmt.Println(formatFlagLine("--show-network", "display relay/STUN diagnostics in the UI"))
+	fmt.Println(formatFlagLine("--auto-exit", "return to the shell after a successful transfer"))
 	fmt.Println(formatFlagLine("--log-file", "append detailed session logs to the given file"))
 }
 
@@ -507,7 +511,7 @@ func hasTTY() bool {
 
 // runHeadless runs the transport with console output when no TTY is available.
 func runHeadless(ctx context.Context, cfg transport.Config, extra transport.Reporter) {
-	fmt.Println("wormzy: TTY not detected, running TUI")
+	fmt.Println("wormzy: TTY not detected, running headless")
 	consoleReporter := transport.ReporterFunc(func(format string, args ...any) {
 		fmt.Printf("[wormzy] "+format+"\n", args...)
 	})

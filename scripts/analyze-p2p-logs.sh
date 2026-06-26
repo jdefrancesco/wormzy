@@ -108,9 +108,9 @@ analyze_logs() {
 
     # Transport used
     echo "## Connection Outcome"
-    if grep -q "direct race won" "$log_file"; then
+    if grep -Eq "direct race won|direct race outcome=won" "$log_file"; then
         echo -e "  ${GREEN}✓ P2P connection established${NC}"
-        grep "direct race won" "$log_file" | head -1
+        grep -E "direct race won|direct race outcome=won" "$log_file" | head -1
     elif grep -q "falling back to relay" "$log_file"; then
         echo -e "  ${YELLOW}→ Fell back to relay${NC}"
         grep "falling back to relay" "$log_file" | head -1
@@ -122,8 +122,8 @@ analyze_logs() {
     # STUN results
     echo "## STUN Discovery"
     if grep -qi "stun" "$log_file"; then
-        stun_success=$(grep -c "STUN.*discovered" "$log_file" || echo "0")
-        stun_fail=$(grep -c "STUN.*error\|STUN.*failed" "$log_file" || echo "0")
+        stun_success=$(grep -Eci "STAGE stun done|STUN.*discovered" "$log_file" || true)
+        stun_fail=$(grep -Eci "STAGE stun error|STUN.*error|STUN.*failed" "$log_file" || true)
         echo "  Successful STUN queries: $stun_success"
         echo "  Failed STUN queries: $stun_fail"
     else
@@ -161,7 +161,7 @@ analyze_logs() {
 
     # Transfer stats
     echo "## Transfer Statistics"
-    if grep -q "transfer complete" "$log_file"; then
+    if grep -Eq "transfer complete|STAGE transfer done" "$log_file"; then
         echo -e "  ${GREEN}✓ Transfer completed successfully${NC}"
         if grep -q "throughput" "$log_file"; then
             grep "throughput" "$log_file" | tail -1
