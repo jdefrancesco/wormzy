@@ -34,6 +34,35 @@ go run ./cmd/wormzy -mode recv -code test-lan 2>&1 | tee recv-lan.log
 go run ./cmd/wormzy -mode send -file testfile.bin -code test-lan 2>&1 | tee send-lan.log
 ```
 
+For durability testing, run a repeated matrix across payload sizes:
+
+```bash
+make build
+./scripts/nat-durability.sh \
+  --trials 50 \
+  --payload-kibs 16,64,1024 \
+  --relay https://relay.wormzy.io
+```
+
+This validates transfer churn and path selection on the current host. It is not
+a strong NAT-punching test unless the peers are actually behind different NATs.
+
+On Linux, use the namespace lab to put sender and receiver behind separate NATs:
+
+```bash
+sudo ./scripts/setup-nat-lab.sh up --mode cone
+./scripts/nat-durability.sh \
+  --trials 40 \
+  --payload-kibs 16,64,1024,8192 \
+  --send-ns nsA \
+  --recv-ns nsB \
+  --relay https://relay.wormzy.io
+sudo ./scripts/setup-nat-lab.sh down
+```
+
+Repeat with `--mode symmetric`. Cone NAT should strongly prefer P2P; symmetric
+NAT is expected to fall back to relay more often.
+
 ### 4. Analyze logs
 
 ```bash
@@ -54,6 +83,7 @@ cp docs/P2P-BASELINE-TEMPLATE.md docs/P2P-BASELINE-$(date +%Y%m%d).md
 - **P2P-OPTIMIZATION-GUIDE.md** - Comprehensive guide explaining timing, tuning, and analysis
 - **P2P-BASELINE-TEMPLATE.md** - Template for recording baseline metrics
 - **../scripts/analyze-p2p-logs.sh** - Helper script to parse transfer logs
+- **../scripts/nat-durability.sh** - Matrix runner for repeated P2P durability trials
 
 ## Workflow
 
