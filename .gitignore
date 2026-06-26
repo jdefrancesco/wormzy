@@ -12,3 +12,4 @@ dist/
 stun.test
 /wormzy
 *.log
+wormzy-debug-*
