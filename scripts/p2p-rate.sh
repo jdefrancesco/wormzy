@@ -21,6 +21,7 @@ Options:
   --recv-ns NAME        Receiver network namespace (optional)
   --trial-timeout SEC   Timeout per sender/receiver process (default: 90)
   --code-timeout SEC    Time to wait for sender to emit pairing code (default: 20)
+  --stats-grace SEC     Time to let clients report stats after transfer (default: 1)
   --workdir DIR         Output directory (default: mktemp)
   --keep                Keep workdir even on success
   -h, --help            Show this help
@@ -45,6 +46,7 @@ SEND_NS=""
 RECV_NS=""
 TRIAL_TIMEOUT_S=90
 CODE_TIMEOUT_S=20
+STATS_GRACE_S=1
 WORKDIR=""
 KEEP_WORKDIR=0
 
@@ -86,6 +88,10 @@ while [[ $# -gt 0 ]]; do
       CODE_TIMEOUT_S="$2"
       shift 2
       ;;
+    --stats-grace)
+      STATS_GRACE_S="$2"
+      shift 2
+      ;;
     --workdir)
       WORKDIR="$2"
       shift 2
@@ -120,6 +126,10 @@ if ! [[ "$TRIAL_TIMEOUT_S" =~ ^[0-9]+$ ]] || [[ "$TRIAL_TIMEOUT_S" -le 0 ]]; the
 fi
 if ! [[ "$CODE_TIMEOUT_S" =~ ^[0-9]+$ ]] || [[ "$CODE_TIMEOUT_S" -le 0 ]]; then
   echo "error: --code-timeout must be a positive integer" >&2
+  exit 2
+fi
+if ! [[ "$STATS_GRACE_S" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "error: --stats-grace must be a non-negative number" >&2
   exit 2
 fi
 if [[ -n "$SEND_NS" || -n "$RECV_NS" ]]; then
@@ -337,12 +347,17 @@ for ((i = 1; i <= TRIALS; i++)); do
   completion_exit=0
   if ! wait_for_transfer_done "$send_log" "$recv_log" "$TRIAL_TIMEOUT_S"; then
     completion_exit=$?
+    stop_pid "$send_pid"
+    stop_pid "$recv_pid"
+    send_exit="$completion_exit"
+    recv_exit="$completion_exit"
+  else
+    sleep "$STATS_GRACE_S"
+    stop_pid "$send_pid"
+    stop_pid "$recv_pid"
+    send_exit=0
+    recv_exit=0
   fi
-  stop_pid "$send_pid"
-  stop_pid "$recv_pid"
-  # Processes are force-stopped after we captured the needed telemetry.
-  send_exit="$completion_exit"
-  recv_exit="$completion_exit"
 
   path="$(detect_path "$send_out" "$recv_out" "$send_log" "$recv_log")"
 
