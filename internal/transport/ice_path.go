@@ -81,6 +81,14 @@ func (p *icePacketConn) SetWriteDeadline(t time.Time) error {
 	return p.conn.SetWriteDeadline(t)
 }
 
+func (p *icePacketConn) SetReadBuffer(n int) error {
+	return nil
+}
+
+func (p *icePacketConn) SetWriteBuffer(n int) error {
+	return nil
+}
+
 func peerSupportsFeature(info rendezvous.SelfInfo, feature string) bool {
 	for _, v := range info.Features {
 		if strings.EqualFold(v, feature) {
