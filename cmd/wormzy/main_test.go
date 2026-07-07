@@ -68,11 +68,41 @@ func TestParseCLI_AutoExitSharedFlag(t *testing.T) {
 	}
 }
 
+func TestParseCLI_NoUPnPSharedFlag(t *testing.T) {
+	sendOpt, err := parseCLI([]string{"send", "payload.bin", "--no-upnp"})
+	if err != nil {
+		t.Fatalf("parse send: %v", err)
+	}
+	if !sendOpt.NoUPnP {
+		t.Fatalf("expected send --no-upnp to be enabled")
+	}
+
+	recvOpt, err := parseCLI([]string{"recv", "--no-upnp", "code-123"})
+	if err != nil {
+		t.Fatalf("parse recv: %v", err)
+	}
+	if !recvOpt.NoUPnP {
+		t.Fatalf("expected recv --no-upnp to be enabled")
+	}
+}
+
 func TestResolveTURNServers_FlagOverridesEnv(t *testing.T) {
 	t.Setenv("WORMZY_TURN_URLS", "turn:env.example.com:3478?transport=udp")
 	got := resolveTURNServers("turn:flag.example.com:3478?transport=udp")
 	if len(got) != 1 || got[0] != "turn:flag.example.com:3478?transport=udp" {
 		t.Fatalf("unexpected turn servers from flag: %#v", got)
+	}
+}
+
+func TestUPnPDisabledByEnv(t *testing.T) {
+	t.Setenv("WORMZY_UPNP", "0")
+	if !upnpDisabledByEnv() {
+		t.Fatalf("expected WORMZY_UPNP=0 to disable UPnP")
+	}
+
+	t.Setenv("WORMZY_UPNP", "yes")
+	if upnpDisabledByEnv() {
+		t.Fatalf("expected WORMZY_UPNP=yes to keep UPnP enabled")
 	}
 }
 

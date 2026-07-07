@@ -78,6 +78,7 @@ type options struct {
 	Timeout     time.Duration
 	IdleTimeout time.Duration
 	DevLoopback bool
+	NoUPnP      bool
 	ShowNetwork bool
 	AutoExit    bool
 	LogFile     string
@@ -179,6 +180,7 @@ func execute(opt options) error {
 		HandshakeTimeout: opt.Timeout,
 		IdleTimeout:      opt.IdleTimeout,
 		Loopback:         opt.DevLoopback,
+		DisableUPnP:      opt.NoUPnP || upnpDisabledByEnv(),
 		DownloadDir:      downloadDir,
 	}
 
@@ -339,6 +341,7 @@ func registerSharedFlags(fs *flag.FlagSet, opt *options) {
 	fs.DurationVar(&opt.Timeout, "timeout", 90*time.Second, "handshake timeout before giving up on pairing")
 	fs.DurationVar(&opt.IdleTimeout, "idle-timeout", 5*time.Minute, "max idle time after pairing before aborting a stalled transfer")
 	fs.BoolVar(&opt.DevLoopback, "dev-loopback", false, "use local addresses for testing")
+	fs.BoolVar(&opt.NoUPnP, "no-upnp", false, "disable automatic UPnP UDP port mapping")
 	fs.BoolVar(&opt.ShowNetwork, "show-network", false, "display relay/STUN diagnostics in the UI")
 	fs.BoolVar(&opt.AutoExit, "auto-exit", false, "exit automatically after a successful transfer")
 	fs.StringVar(&opt.LogFile, "log-file", "", "append detailed session logs to the given file")
@@ -379,6 +382,7 @@ func printSharedFlags() {
 	fmt.Println(formatFlagLine("--timeout", "handshake timeout before giving up on pairing (default 1m30s)"))
 	fmt.Println(formatFlagLine("--idle-timeout", "max idle time after pairing before aborting (default 5m0s)"))
 	fmt.Println(formatFlagLine("--dev-loopback", "keep traffic on localhost for demos"))
+	fmt.Println(formatFlagLine("--no-upnp", "disable automatic UPnP UDP port mapping"))
 	fmt.Println(formatFlagLine("--show-network", "display relay/STUN diagnostics in the UI"))
 	fmt.Println(formatFlagLine("--auto-exit", "return to the shell after a successful transfer"))
 	fmt.Println(formatFlagLine("--log-file", "append detailed session logs to the given file"))
@@ -611,6 +615,15 @@ func resolveTURNServers(flagValue string) []string {
 		out = append(out, part)
 	}
 	return out
+}
+
+func upnpDisabledByEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WORMZY_UPNP"))) {
+	case "0", "false", "no", "off", "disabled":
+		return true
+	default:
+		return false
+	}
 }
 
 func formatTURNServerSummary(servers []string) string {

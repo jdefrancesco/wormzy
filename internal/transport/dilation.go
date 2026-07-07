@@ -14,7 +14,7 @@ const (
 	chunkSize  = 1 << 16
 )
 
-func buildCandidates(self rendezvous.SelfInfo, loopback bool, relayAddr string) []rendezvous.Candidate {
+func buildCandidates(self rendezvous.SelfInfo, loopback bool, upnpAddr, relayAddr string) []rendezvous.Candidate {
 	var out []rendezvous.Candidate
 	seen := make(map[string]bool)
 	add := func(typ, proto, addr string, prio int) {
@@ -39,6 +39,7 @@ func buildCandidates(self rendezvous.SelfInfo, loopback bool, relayAddr string) 
 		return out
 	}
 
+	add("upnp", "udp", upnpAddr, 110)
 	add("reflexive", "udp", self.Public, 100)
 	add("local", "udp", self.Local, 60)
 	add("relay", "udp", relayAddr, 40)
@@ -127,6 +128,10 @@ func candidateRaceWeight(cand rendezvous.Candidate, preferLocal bool) int {
 	case "local":
 		if preferLocal {
 			score += 1000
+		}
+	case "upnp":
+		if !preferLocal {
+			score += 950
 		}
 	case "reflexive":
 		if !preferLocal {

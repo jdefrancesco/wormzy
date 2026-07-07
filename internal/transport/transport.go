@@ -77,6 +77,7 @@ type Config struct {
 	HandshakeTimeout time.Duration
 	IdleTimeout      time.Duration
 	Loopback         bool
+	DisableUPnP      bool
 	DownloadDir      string
 }
 
@@ -189,7 +190,26 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 			self.Public = self.Local
 		}
 	}
-	self.Candidates = buildCandidates(self, cfg.Loopback, cfg.relayCandidateAddr())
+	upnpMapping, err := setupUPnPMapping(ctx, cfg, udpConn, self.Public, reporter)
+	if err != nil {
+		reporter.Logf("continuing without UPnP")
+	}
+	if upnpMapping != nil {
+		defer func() {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultUPnPTimeout)
+			defer cancel()
+			if err := upnpMapping.Close(cleanupCtx); err != nil {
+				reporter.Logf("upnp/cleanup failed: %v", err)
+			} else {
+				reporter.Logf("upnp/cleanup external=%s", upnpMapping.externalAddr)
+			}
+		}()
+	}
+	upnpAddr := ""
+	if upnpMapping != nil {
+		upnpAddr = upnpMapping.externalAddr
+	}
+	self.Candidates = buildCandidates(self, cfg.Loopback, upnpAddr, cfg.relayCandidateAddr())
 	reporter.Logf("candidates/self %s", formatCandidateList(self.Candidates))
 
 	mbox, err := newMailbox(ctx, cfg)

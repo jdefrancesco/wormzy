@@ -22,7 +22,7 @@ It's primary features include:
 ## Wormzy vs. Magic Wormhole
 
 - Transport: QUIC + Noise with NAT punching; Magic Wormhole uses TCP + PAKE with relay streams.
-- Defaults: Baked-in HTTPS mailbox endpoint, STUN list, and optional QUIC relay fallback; Magic Wormhole typically needs a relay URL or uses the Python community relay.
+- Defaults: Baked-in HTTPS mailbox endpoint, STUN list, best-effort UPnP port mapping, and optional QUIC relay fallback; Magic Wormhole typically needs a relay URL or uses the Python community relay.
 - UX: Bubble Tea TUI with headless fallback; Magic Wormhole is plain CLI.
 - File safety: Collision-safe saves (`name (wormzy-1).txt`) and disk-space preflight; Magic Wormhole overwrites unless redirected.
 - Metrics: Built-in dashboard over Redis showing P2P vs relay; Magic Wormhole doesn’t expose relay/session metrics.
@@ -75,10 +75,10 @@ On a server with the `systemd` units installed, run `make deploy`. It builds the
 
 ## Endpoint defaults
 
-The CLI ships with a baked-in mailbox/rendezvous endpoint (`https://relay.wormzy.io`). You don’t need to set anything for basic use. To override, pass `-relay ...` or set `WORMZY_RELAY_URL`. A config file at `$XDG_CONFIG_HOME/wormzy/relay` or `/etc/wormzy/relay` is also honored.
+The CLI ships with a baked-in mailbox/rendezvous endpoint (`https://relay.wormzy.io`). You don’t need to set anything for basic use. To override, pass `-relay ...` or set `WORMZY_RELAY_URL`. A config file at `$XDG_CONFIG_HOME/wormzy/relay` or `/etc/wormzy/relay` is also honored. Wormzy also tries temporary UDP UPnP port mapping by default; pass `--no-upnp` or set `WORMZY_UPNP=0` to disable it.
 
 Wormzy transport paths are:
-- direct: UDP/QUIC NAT punching (preferred)
+- direct: UDP/QUIC NAT punching, including STUN and temporary UPnP candidates (preferred)
 - relay fallback: QUIC relay on UDP/3478 (only if direct race fails)
 
 ## Screenshots
