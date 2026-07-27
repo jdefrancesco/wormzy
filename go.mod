@@ -15,7 +15,7 @@ require (
 	github.com/quic-go/quic-go v0.59.0
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/zeebo/blake3 v0.2.4
-	golang.org/x/crypto v0.51.0
+	golang.org/x/crypto v0.52.0
 )
 
 require (
