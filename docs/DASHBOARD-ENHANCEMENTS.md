@@ -10,11 +10,11 @@ The dashboard has been significantly enhanced to provide more verbose and action
 
 The dashboard now prominently displays P2P success rate with color-coded indicators:
 
-- 🟢 **80%+ (EXCELLENT)** - P2P working great!
-- 🟢 **70-80% (GOOD)** - Healthy P2P rate
-- 🟡 **50-70% (FAIR)** - Room for improvement
-- 🟠 **30-50% (POOR)** - P2P struggling - check logs
-- 🔴 **<30% (CRITICAL)** - P2P mostly failing - investigate
+- **80%+ (EXCELLENT)** - P2P working great!
+- **70-80% (GOOD)** - Healthy P2P rate
+- **50-70% (FAIR)** - Room for improvement
+- **30-50% (POOR)** - P2P struggling - check logs
+- **<30% (CRITICAL)** - P2P mostly failing - investigate
 
 This gives you an at-a-glance understanding of your P2P health.
 
@@ -23,15 +23,17 @@ This gives you an at-a-glance understanding of your P2P health.
 Press `v` to toggle between verbose and compact modes:
 
 **Verbose mode shows:**
+
 - Candidate type for each session (reflexive, local, relay)
 - Detailed waiting states (waiting recv/send)
-- Avg duration and throughput
+- Avg. duration and throughput
 - Expanded direct outcomes with percentages
 - Full candidate usage breakdown
 - More failure details (8 instead of 4)
 - Longer error messages (80 chars vs 56)
 
 **Compact mode shows:**
+
 - Essential metrics only
 - Aggregated summaries
 - Perfect for smaller terminals or quick glances
@@ -39,6 +41,7 @@ Press `v` to toggle between verbose and compact modes:
 ### 3. **Built-in Help Screen**
 
 Press `h` or `?` to view an interactive help screen that explains:
+
 - All keyboard shortcuts
 - What each metric means
 - P2P success rate thresholds
@@ -55,7 +58,8 @@ Press `h` or `?` to view an interactive help screen that explains:
 
 ### 5. **Enhanced Debug Panel**
 
-Now titled "🔍 Debug Information" with:
+Now titled "Debug Information" with:
+
 - Direct outcomes listed individually with percentages (verbose mode)
 - Candidates used listed individually with counts (verbose mode)
 - More detailed failure information
@@ -64,6 +68,7 @@ Now titled "🔍 Debug Information" with:
 ### 6. **Improved Session Tables**
 
 Verbose mode adds a "Candidate" column showing which connection type was used:
+
 ```
 Code         State        Size       Duration   Candidate    TTL left
 test-123     P2P          5.2 MiB    3s         reflexive    8m32s
@@ -72,6 +77,7 @@ test-123     P2P          5.2 MiB    3s         reflexive    8m32s
 ### 7. **Clearer Footer**
 
 Footer now shows:
+
 - Current mode (verbose/compact)
 - Available actions
 - Example: `Mode: verbose • Press h for help, q to exit`
