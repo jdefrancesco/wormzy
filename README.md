@@ -69,6 +69,9 @@ The STUN tests bind UDP sockets; they will automatically skip on environments th
 
 Large transfers run with per-stream idle timeouts; stalled sessions abort instead of hanging. To sanity-check on localhost, run the loopback transfer test: `go test -run TestLargeTransferLoopback ./internal/transport` (skipped automatically with `-short`).
 
+To measure whether UPnP improves direct connections across two real NATs, use
+the balanced two-host workflow in [`docs/UPNP-AB-TEST.md`](docs/UPNP-AB-TEST.md).
+
 ## Deploying updated binaries
 
 On a server with the `systemd` units installed, run `make deploy`. It builds the binaries, installs them to `/usr/local/bin`, reloads systemd, and restarts `wormzy-mailbox`, `wormzy-rendezvous`, and `wormzy-relay` (ignored if those services are absent).

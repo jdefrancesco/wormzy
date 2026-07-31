@@ -17,6 +17,7 @@ Options:
   --wormzy PATH         Wormzy binary path (default: ./bin/wormzy)
   --relay URL           Relay/mailbox endpoint (default: https://relay.wormzy.io)
   --turn URLS           Optional TURN list passed to wormzy --turn
+  --no-upnp             Disable UPnP on both peers
   --send-ns NAME        Sender network namespace (optional)
   --recv-ns NAME        Receiver network namespace (optional)
   --trial-timeout SEC   Timeout per sender/receiver process (default: 90)
@@ -49,6 +50,7 @@ CODE_TIMEOUT_S=20
 STATS_GRACE_S=1
 WORKDIR=""
 KEEP_WORKDIR=0
+DISABLE_UPNP=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -71,6 +73,10 @@ while [[ $# -gt 0 ]]; do
     --turn)
       TURN_URLS="$2"
       shift 2
+      ;;
+    --no-upnp)
+      DISABLE_UPNP=1
+      shift
       ;;
     --send-ns)
       SEND_NS="$2"
@@ -253,7 +259,7 @@ detect_path() {
 
   # Headless output is not guaranteed to print the final "Path:" line yet,
   # so classify from detailed transport logs as the primary signal.
-  if grep -Eiq "direct race outcome=won details=(ice-p2p|local|reflexive|loopback)@" "$send_log" "$recv_log"; then
+  if grep -Eiq "direct race outcome=won details=.*(ice-p2p|local|reflexive|loopback|upnp)@.*=won" "$send_log" "$recv_log"; then
     echo "p2p"
     return 0
   fi
@@ -286,6 +292,11 @@ pct() {
 echo "[p2p-rate] workdir: $WORKDIR"
 echo "[p2p-rate] trials: $TRIALS"
 echo "[p2p-rate] relay: $RELAY"
+if [[ "$DISABLE_UPNP" -eq 1 ]]; then
+  echo "[p2p-rate] UPnP: disabled"
+else
+  echo "[p2p-rate] UPnP: enabled"
+fi
 if [[ -n "$SEND_NS" ]]; then
   echo "[p2p-rate] sender namespace: $SEND_NS"
   echo "[p2p-rate] receiver namespace: $RECV_NS"
@@ -318,6 +329,10 @@ for ((i = 1; i <= TRIALS; i++)); do
   if [[ -n "$TURN_URLS" ]]; then
     send_cmd+=( -turn "$TURN_URLS" )
     recv_cmd_base+=( -turn "$TURN_URLS" )
+  fi
+  if [[ "$DISABLE_UPNP" -eq 1 ]]; then
+    send_cmd+=( -no-upnp )
+    recv_cmd_base+=( -no-upnp )
   fi
 
   run_in_ns "$SEND_NS" "${send_cmd[@]}" >"$send_out" 2>&1 &

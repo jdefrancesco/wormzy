@@ -196,7 +196,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 	}
 	if upnpMapping != nil {
 		defer func() {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultUPnPTimeout)
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultUPnPCleanupTimeout)
 			defer cancel()
 			if err := upnpMapping.Close(cleanupCtx); err != nil {
 				reporter.Logf("upnp/cleanup failed: %v", err)

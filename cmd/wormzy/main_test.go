@@ -86,6 +86,16 @@ func TestParseCLI_NoUPnPSharedFlag(t *testing.T) {
 	}
 }
 
+func TestParseCLI_SendProvidedCode(t *testing.T) {
+	opt, err := parseCLI([]string{"send", "payload.bin", "--code", "upnp-ab-0123456789abcdef"})
+	if err != nil {
+		t.Fatalf("parse send: %v", err)
+	}
+	if opt.Code != "upnp-ab-0123456789abcdef" {
+		t.Fatalf("send code = %q; want preselected A/B trial code", opt.Code)
+	}
+}
+
 func TestResolveTURNServers_FlagOverridesEnv(t *testing.T) {
 	t.Setenv("WORMZY_TURN_URLS", "turn:env.example.com:3478?transport=udp")
 	got := resolveTURNServers("turn:flag.example.com:3478?transport=udp")

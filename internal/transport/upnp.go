@@ -14,10 +14,12 @@ import (
 )
 
 const (
-	defaultUPnPLease   = 2 * time.Hour
-	defaultUPnPTimeout = 3 * time.Second
-	upnpDescription    = "wormzy p2p"
-	upnpProtocolUDP    = "UDP"
+	defaultUPnPLease          = 2 * time.Hour
+	defaultUPnPTimeout        = 8 * time.Second
+	minimumUPnPTimeout        = 4 * time.Second
+	defaultUPnPCleanupTimeout = 3 * time.Second
+	upnpDescription           = "wormzy p2p"
+	upnpProtocolUDP           = "UDP"
 )
 
 type upnpPortMapper interface {
@@ -56,10 +58,7 @@ func setupUPnPMapping(ctx context.Context, cfg Config, conn *net.UDPConn, public
 	if conn == nil {
 		return nil, nil
 	}
-	timeout := defaultUPnPTimeout
-	if cfg.HandshakeTimeout > 0 {
-		timeout = boundedDuration(cfg.HandshakeTimeout/20, 1500*time.Millisecond, defaultUPnPTimeout)
-	}
+	timeout := upnpTimeout(cfg.HandshakeTimeout)
 	upnpCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -74,6 +73,13 @@ func setupUPnPMapping(ctx context.Context, cfg Config, conn *net.UDPConn, public
 		rep.Logf("upnp/map external=%s lease=%s", mapping.externalAddr, defaultUPnPLease)
 	}
 	return mapping, nil
+}
+
+func upnpTimeout(handshakeTimeout time.Duration) time.Duration {
+	if handshakeTimeout <= 0 {
+		return defaultUPnPTimeout
+	}
+	return boundedDuration(handshakeTimeout/10, minimumUPnPTimeout, defaultUPnPTimeout)
 }
 
 func createUPnPMapping(

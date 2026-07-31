@@ -162,3 +162,25 @@ func TestUsableExternalIPv4RejectsPrivateAndCGNAT(t *testing.T) {
 		t.Fatalf("public address should be accepted")
 	}
 }
+
+func TestUPnPTimeoutAllowsDiscoveryAndSOAPCalls(t *testing.T) {
+	tests := []struct {
+		name      string
+		handshake time.Duration
+		want      time.Duration
+	}{
+		{name: "default", handshake: 0, want: 8 * time.Second},
+		{name: "normal handshake", handshake: 90 * time.Second, want: 8 * time.Second},
+		{name: "medium handshake", handshake: 60 * time.Second, want: 6 * time.Second},
+		{name: "short handshake retains minimum discovery budget", handshake: 20 * time.Second, want: 4 * time.Second},
+		{name: "long handshake stays bounded", handshake: 5 * time.Minute, want: 8 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := upnpTimeout(tt.handshake); got != tt.want {
+				t.Fatalf("upnpTimeout(%s) = %s; want %s", tt.handshake, got, tt.want)
+			}
+		})
+	}
+}

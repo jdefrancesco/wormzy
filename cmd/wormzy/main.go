@@ -248,6 +248,7 @@ func parseSend(args []string) (options, error) {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opt.File, "file", "", "file to send (optional if provided positionally)")
+	fs.StringVar(&opt.Code, "code", "", "preselect a pairing code for automation")
 	registerSharedFlags(fs, &opt)
 	fs.Usage = printSendUsage
 
@@ -362,6 +363,7 @@ func printSendUsage() {
 	fmt.Println()
 	fmt.Println(usageHeadingStyle.Render("Flags"))
 	fmt.Println(formatFlagLine("--file", "file to send (optional if provided positionally)"))
+	fmt.Println(formatFlagLine("--code", "preselect a pairing code for automation"))
 	printSharedFlags()
 }
 
