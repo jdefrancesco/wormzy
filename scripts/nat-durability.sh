@@ -11,7 +11,7 @@ Options:
   --payload-kibs LIST   Comma-separated KiB sizes (default: 16,64,1024)
   --wormzy PATH         Wormzy binary path (default: ./bin/wormzy)
   --relay URL           Relay/mailbox endpoint (default: https://relay.wormzy.io)
-  --turn URLS           Optional TURN list passed to wormzy --turn
+  --turn URLS           Optional authenticated TURN list passed to wormzy --turn
   --send-ns NAME        Sender network namespace (optional)
   --recv-ns NAME        Receiver network namespace (optional)
   --trial-timeout SEC   Timeout per sender/receiver process (default: 90)
@@ -203,7 +203,7 @@ append_summary_header() {
     if [[ -n "$TURN_URLS" ]]; then
       echo "- TURN URLs: configured"
     else
-      echo "- TURN URLs: default"
+      echo "- TURN URLs: not configured"
     fi
     echo
     echo "| Payload KiB | Trials | P2P | Relay | Fail | P2P All % | P2P Success % | Longest P2P Streak | Status |"

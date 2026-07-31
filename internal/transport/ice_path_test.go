@@ -1,6 +1,8 @@
 package transport
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,7 +39,7 @@ func TestBoundedDurationClamp(t *testing.T) {
 func TestBuildICEURLs_STUNAndTURN(t *testing.T) {
 	set := buildICEURLs(
 		[]string{"stun.l.google.com:19302"},
-		[]string{"turn:turn.example.com:3478?transport=udp"},
+		[]string{"turn:user:pass@turn.example.com:3478?transport=udp"},
 		nil,
 	)
 	if !set.hasSTUN {
@@ -49,18 +51,91 @@ func TestBuildICEURLs_STUNAndTURN(t *testing.T) {
 	if len(set.urls) != 2 {
 		t.Fatalf("expected 2 urls, got %d", len(set.urls))
 	}
+	turn := set.urls[1]
+	if turn.Username != "user" || turn.Password != "pass" {
+		t.Fatalf("unexpected TURN credentials: username=%q password=%q", turn.Username, turn.Password)
+	}
 }
 
-func TestBuildICEURLs_NormalizeTurnHostPort(t *testing.T) {
+func TestBuildICEURLs_SkipsTURNWithoutCredentials(t *testing.T) {
 	set := buildICEURLs(nil, []string{"turn.example.com:3478"}, nil)
-	if !set.hasTURN {
-		t.Fatalf("expected TURN support")
+	if set.hasTURN {
+		t.Fatalf("unexpected TURN support without credentials")
 	}
-	if len(set.urls) != 1 {
-		t.Fatalf("expected 1 url, got %d", len(set.urls))
+	if len(set.urls) != 0 {
+		t.Fatalf("expected credential-less TURN URL to be skipped, got %d url(s)", len(set.urls))
 	}
-	if got := set.urls[0].String(); got != "turn:turn.example.com:3478?transport=udp" {
-		t.Fatalf("unexpected normalized turn url: %s", got)
+}
+
+func TestBuildICEURLs_NormalizesAuthenticatedTURN(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		username string
+		password string
+		wantURI  string
+	}{
+		{
+			name:     "opaque URI",
+			raw:      "turn:user:pass@turn.example.com:3478?transport=udp",
+			username: "user",
+			password: "pass",
+			wantURI:  "turn:turn.example.com:3478?transport=udp",
+		},
+		{
+			name:     "double slash URI",
+			raw:      "turn://user:pass@turn.example.com:3478?transport=udp",
+			username: "user",
+			password: "pass",
+			wantURI:  "turn:turn.example.com:3478?transport=udp",
+		},
+		{
+			name:     "escaped credentials",
+			raw:      "turn:user%40example.com:p%3Aass@turn.example.com:3478?transport=udp",
+			username: "user@example.com",
+			password: "p:ass",
+			wantURI:  "turn:turn.example.com:3478?transport=udp",
+		},
+		{
+			name:     "secure TURN",
+			raw:      "turns:user:pass@turn.example.com:5349?transport=tcp",
+			username: "user",
+			password: "pass",
+			wantURI:  "turns:turn.example.com:5349?transport=tcp",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			set := buildICEURLs(nil, []string{tt.raw}, nil)
+			if !set.hasTURN || len(set.urls) != 1 {
+				t.Fatalf("expected one usable TURN URL, got hasTURN=%t urls=%d", set.hasTURN, len(set.urls))
+			}
+			u := set.urls[0]
+			if u.Username != tt.username || u.Password != tt.password {
+				t.Fatalf("unexpected TURN credentials: username=%q password=%q", u.Username, u.Password)
+			}
+			if got := u.String(); got != tt.wantURI {
+				t.Fatalf("unexpected normalized TURN URL: %s", got)
+			}
+		})
+	}
+}
+
+func TestBuildICEURLs_RedactsSkippedTURNCredentials(t *testing.T) {
+	var logLine string
+	reporter := ReporterFunc(func(format string, args ...interface{}) {
+		logLine = fmt.Sprintf(format, args...)
+	})
+
+	set := buildICEURLs(nil, []string{"turn:private-user@turn.example.com:3478"}, reporter)
+	if set.hasTURN || len(set.urls) != 0 {
+		t.Fatalf("expected invalid TURN URL to be skipped")
+	}
+	if strings.Contains(logLine, "private-user") {
+		t.Fatalf("TURN username leaked in log: %q", logLine)
+	}
+	if !strings.Contains(logLine, "turn:***@turn.example.com:3478") {
+		t.Fatalf("expected redacted TURN endpoint in log, got %q", logLine)
 	}
 }
 

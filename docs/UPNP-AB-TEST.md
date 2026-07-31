@@ -54,7 +54,9 @@ and waits for the matching peer. The disabled arm passes `--no-upnp`; the
 enabled arm uses Wormzy's default behavior.
 
 If the run uses a non-default mailbox or TURN deployment, pass the same
-`--relay` and `--turn` values on both machines.
+`--relay` and authenticated `--turn` values on both machines. TURN URLs use
+`turn:user:password@host:port?transport=udp` (percent-escape delimiters inside
+the username or password).
 
 ## Merge the evidence
 

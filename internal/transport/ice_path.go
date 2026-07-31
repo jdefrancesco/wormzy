@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -139,26 +140,10 @@ func buildICEURLs(stunServers, turnServers []string, rep Reporter) iceURLSet {
 		if server == "" {
 			continue
 		}
-		uri := server
-		switch {
-		case strings.HasPrefix(server, "turn://"):
-			uri = "turn:" + strings.TrimPrefix(server, "turn://")
-		case strings.HasPrefix(server, "turns://"):
-			uri = "turns:" + strings.TrimPrefix(server, "turns://")
-		case strings.HasPrefix(server, "turn:"), strings.HasPrefix(server, "turns:"):
-			// already normalized
-		default:
-			// Host:port entries are accepted for convenience; default to UDP.
-			if strings.Contains(server, "?") {
-				uri = "turn:" + server
-			} else {
-				uri = "turn:" + server + "?transport=udp"
-			}
-		}
-		u, err := pionstun.ParseURI(uri)
+		u, err := parseTURNURI(server)
 		if err != nil {
 			if rep != nil {
-				rep.Logf("ice/turn uri parse failed %s: %v", redactICEEndpoint(server), err)
+				rep.Logf("ice/turn skipped %s: %v", redactICEEndpoint(server), err)
 			}
 			continue
 		}
@@ -166,6 +151,54 @@ func buildICEURLs(stunServers, turnServers []string, rep Reporter) iceURLSet {
 		out.hasTURN = true
 	}
 	return out
+}
+
+func parseTURNURI(raw string) (*pionstun.URI, error) {
+	raw = strings.TrimSpace(raw)
+	lower := strings.ToLower(raw)
+	scheme := "turn"
+	rest := raw
+	switch {
+	case strings.HasPrefix(lower, "turn://"):
+		rest = raw[len("turn://"):]
+	case strings.HasPrefix(lower, "turns://"):
+		scheme = "turns"
+		rest = raw[len("turns://"):]
+	case strings.HasPrefix(lower, "turn:"):
+		rest = raw[len("turn:"):]
+	case strings.HasPrefix(lower, "turns:"):
+		scheme = "turns"
+		rest = raw[len("turns:"):]
+	}
+
+	at := strings.LastIndex(rest, "@")
+	if at < 0 {
+		return nil, errors.New("username and password are required")
+	}
+	credentialText, endpoint := rest[:at], rest[at+1:]
+	usernameText, passwordText, ok := strings.Cut(credentialText, ":")
+	if !ok || usernameText == "" || passwordText == "" {
+		return nil, errors.New("username and password are required")
+	}
+	username, err := url.PathUnescape(usernameText)
+	if err != nil {
+		return nil, errors.New("username has invalid escaping")
+	}
+	password, err := url.PathUnescape(passwordText)
+	if err != nil {
+		return nil, errors.New("password has invalid escaping")
+	}
+	if username == "" || password == "" {
+		return nil, errors.New("username and password are required")
+	}
+
+	u, err := pionstun.ParseURI(scheme + ":" + endpoint)
+	if err != nil {
+		return nil, err
+	}
+	u.Username = username
+	u.Password = password
+	return u, nil
 }
 
 func redactICEEndpoint(raw string) string {

@@ -46,7 +46,6 @@ const (
 	// via CLI flag or environment (WORMZY_RELAY_URL / WORMZY_RELAY).
 	defaultRelay          = "https://relay.wormzy.io"
 	defaultRelayUDPPort   = 3478
-	defaultTURNUDPPort    = 3479
 	defaultHandshakeTO    = 90 * time.Second
 	defaultTransferIdleTO = 5 * time.Minute
 	relayFallbackDelay    = 4 * time.Second
@@ -70,9 +69,8 @@ type Config struct {
 	RelayAddr   string
 	RelayPin    string
 	STUNServers []string
-	// TURNServers holds TURN/STUN URI strings used by ICE (for example:
-	// "turn:user:pass@turn.example.com:3478?transport=udp"). When empty,
-	// Wormzy derives a default TURN endpoint from the relay host.
+	// TURNServers holds authenticated TURN URI strings used by ICE (for example:
+	// "turn:user:pass@turn.example.com:3478?transport=udp").
 	TURNServers      []string
 	HandshakeTimeout time.Duration
 	IdleTimeout      time.Duration
@@ -895,43 +893,10 @@ func DefaultRelay() string {
 	return defaultRelay
 }
 
-// DefaultTURNServers returns fallback TURN endpoints derived from relayAddr.
-// By default we use relay host + UDP/3479 (leaving UDP/3478 free for wormzy-relay).
-func DefaultTURNServers(relayAddr string) []string {
-	host := defaultTURNHost(relayAddr)
-	if host == "" {
-		return nil
-	}
-	return []string{net.JoinHostPort(host, strconv.Itoa(defaultTURNUDPPort))}
-}
-
-func defaultTURNHost(relayAddr string) string {
-	if strings.TrimSpace(relayAddr) == "" {
-		relayAddr = defaultRelay
-	}
-	if strings.Contains(relayAddr, "://") {
-		u, err := url.Parse(relayAddr)
-		if err != nil {
-			return ""
-		}
-		switch strings.ToLower(u.Scheme) {
-		case "http", "https", "stun", "stuns", "turn", "turns":
-			return u.Hostname()
-		default:
-			// Skip redis and unknown schemes; explicit TURN config should be used.
-			return ""
-		}
-	}
-	if host, _, err := net.SplitHostPort(relayAddr); err == nil {
-		return host
-	}
-	if ip := net.ParseIP(relayAddr); ip != nil {
-		return relayAddr
-	}
-	if strings.Contains(relayAddr, "/") {
-		return ""
-	}
-	return relayAddr
+// DefaultTURNServers returns no implicit TURN server. TURN requires credentials,
+// which cannot be derived safely from the rendezvous address.
+func DefaultTURNServers(_ string) []string {
+	return nil
 }
 
 func (cfg Config) relayCandidateAddr() string {

@@ -22,7 +22,7 @@ Run options:
   --plan FILE          Shared plan CSV (required)
   --wormzy PATH        Wormzy binary (default: ./bin/wormzy)
   --relay URL          Mailbox endpoint (default: https://relay.wormzy.io)
-  --turn URLS          Optional TURN list passed to wormzy --turn
+  --turn URLS          Optional authenticated TURN list passed to wormzy --turn
   --payload FILE       Sender payload (default: generated 64 KiB file)
   --payload-kib N      Generated sender payload size (default: 64)
   --trial-timeout SEC  Handshake timeout for each trial (default: 90)

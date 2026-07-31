@@ -16,7 +16,7 @@ Options:
   --payload-kib N       Payload size in KiB (default: 64)
   --wormzy PATH         Wormzy binary path (default: ./bin/wormzy)
   --relay URL           Relay/mailbox endpoint (default: https://relay.wormzy.io)
-  --turn URLS           Optional TURN list passed to wormzy --turn
+  --turn URLS           Optional authenticated TURN list passed to wormzy --turn
   --no-upnp             Disable UPnP on both peers
   --send-ns NAME        Sender network namespace (optional)
   --recv-ns NAME        Receiver network namespace (optional)
