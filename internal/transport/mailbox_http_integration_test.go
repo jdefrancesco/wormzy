@@ -3,7 +3,9 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +37,89 @@ func TestMailboxHTTPServer_Healthz(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("healthz status = %d", resp.StatusCode)
+	}
+}
+
+func TestMailboxHTTPServer_DrainRejectsNewClaims(t *testing.T) {
+	mini, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mini.Close()
+
+	ctx := context.Background()
+	collector, err := NewMetricsCollector("redis://"+mini.Addr(), "wormzy")
+	if err != nil {
+		t.Fatalf("NewMetricsCollector: %v", err)
+	}
+	defer collector.Close()
+	if err := collector.SetDraining(ctx, true); err != nil {
+		t.Fatalf("SetDraining: %v", err)
+	}
+
+	srv, err := NewMailboxHTTPServer(mini.Addr(), time.Minute)
+	if err != nil {
+		t.Fatalf("NewMailboxHTTPServer: %v", err)
+	}
+	if err := srv.SyncOperations(ctx); err != nil {
+		t.Fatalf("SyncOperations: %v", err)
+	}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		ts.URL+"/v1/claim",
+		strings.NewReader(`{"role":"send","requested":""}`),
+	)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("POST /v1/claim: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("claim status = %d; want %d", resp.StatusCode, http.StatusServiceUnavailable)
+	}
+
+	redisClient := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	defer redisClient.Close()
+	store := newSessionStore(redisClient, time.Minute, "wormzy")
+	if _, err := store.registerSender(ctx, "existing-01"); err != nil {
+		t.Fatalf("register existing sender: %v", err)
+	}
+	req, err = http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		ts.URL+"/v1/claim",
+		strings.NewReader(`{"role":"recv","requested":"existing-01"}`),
+	)
+	if err != nil {
+		t.Fatalf("new receiver request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("receiver POST /v1/claim: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("receiver claim during drain = %d; want %d", resp.StatusCode, http.StatusOK)
+	}
+	if err := srv.telemetry.Publish(ctx); err != nil {
+		t.Fatalf("publish mailbox telemetry: %v", err)
+	}
+	metrics, err := collector.Collect(ctx)
+	if err != nil {
+		t.Fatalf("collect mailbox telemetry: %v", err)
+	}
+	mailbox := findServiceSnapshot(t, metrics.Services, "mailbox")
+	if mailbox.Requests != 2 || mailbox.RequestErrors != 1 || mailbox.ActiveRequests != 0 {
+		t.Fatalf("unexpected mailbox request telemetry: %+v", mailbox)
 	}
 }
 

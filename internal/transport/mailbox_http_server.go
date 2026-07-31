@@ -1,8 +1,10 @@
 package transport
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -11,10 +13,13 @@ import (
 )
 
 type MailboxHTTPServer struct {
-	client *redis.Client
-	ttl    time.Duration
-	store  *sessionStore
+	client    *redis.Client
+	ttl       time.Duration
+	store     *sessionStore
+	telemetry *ServiceTelemetry
 }
+
+var errServiceDraining = errors.New("wormzy is draining; new sessions are temporarily disabled")
 
 func NewMailboxHTTPServer(redisURL string, ttl time.Duration) (*MailboxHTTPServer, error) {
 	opts, err := redis.ParseURL(redisURL)
@@ -22,14 +27,22 @@ func NewMailboxHTTPServer(redisURL string, ttl time.Duration) (*MailboxHTTPServe
 		opts = &redis.Options{Addr: redisURL}
 	}
 	client := redis.NewClient(opts)
-	return &MailboxHTTPServer{
+	server := &MailboxHTTPServer{
 		client: client,
 		ttl:    ttl,
 		store:  newSessionStore(client, ttl, "wormzy"),
-	}, nil
+	}
+	server.telemetry = newServiceTelemetryWithClient(client, "wormzy", "mailbox")
+	return server, nil
 }
 
 func (s *MailboxHTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	statusWriter := &responseStatusWriter{ResponseWriter: w, status: http.StatusOK}
+	if s.telemetry != nil {
+		s.telemetry.BeginRequest()
+		defer func() { s.telemetry.EndRequest(statusWriter.status) }()
+	}
+	w = statusWriter
 	switch r.URL.Path {
 	case "/v1/claim":
 		s.handleClaim(w, r)
@@ -48,6 +61,40 @@ func (s *MailboxHTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+type responseStatusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *responseStatusWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+// SyncOperations refreshes drain control and publishes a mailbox heartbeat.
+func (s *MailboxHTTPServer) SyncOperations(ctx context.Context) error {
+	if s == nil || s.telemetry == nil {
+		return nil
+	}
+	return s.telemetry.Sync(ctx)
+}
+
+// RunOperations keeps the mailbox visible to the operator dashboard.
+func (s *MailboxHTTPServer) RunOperations(ctx context.Context, interval time.Duration) {
+	if s == nil || s.telemetry == nil {
+		return
+	}
+	s.telemetry.Run(ctx, interval)
+}
+
+// Close releases the mailbox Redis connection.
+func (s *MailboxHTTPServer) Close() error {
+	if s == nil || s.client == nil {
+		return nil
+	}
+	return s.client.Close()
 }
 
 func (s *MailboxHTTPServer) newMailbox(role, code string) *redisMailbox {
@@ -73,6 +120,10 @@ func (s *MailboxHTTPServer) handleClaim(w http.ResponseWriter, r *http.Request) 
 	mb := s.newMailbox(req.Role, "")
 	code, err := mb.Claim(r.Context(), req.Requested)
 	if err != nil {
+		if errors.Is(err, errServiceDraining) {
+			writeHTTPError(w, http.StatusServiceUnavailable, err)
+			return
+		}
 		writeHTTPError(w, http.StatusBadRequest, err)
 		return
 	}

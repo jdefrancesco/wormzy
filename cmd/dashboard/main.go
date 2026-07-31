@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -67,6 +68,24 @@ type dashboardModel struct {
 	height   int
 	verbose  bool
 	showHelp bool
+
+	selectedSession int
+	pending         *controlAction
+	controlBusy     bool
+	notice          string
+}
+
+type controlKind string
+
+const (
+	controlDrain     controlKind = "drain"
+	controlTerminate controlKind = "terminate"
+)
+
+type controlAction struct {
+	kind     controlKind
+	code     string
+	draining bool
 }
 
 func newDashboardModel(collector *transport.MetricsCollector, refresh time.Duration) dashboardModel {
@@ -91,9 +110,28 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c", "q":
+		key := msg.String()
+		if key == "ctrl+c" || key == "q" {
 			return m, tea.Quit
+		}
+		if m.pending != nil {
+			switch key {
+			case "y":
+				action := *m.pending
+				m.pending = nil
+				m.controlBusy = true
+				m.notice = "Applying operator action…"
+				return m, executeControlCmd(m.collector, action)
+			case "n", "esc":
+				m.pending = nil
+				m.notice = "Operator action canceled"
+			}
+			return m, nil
+		}
+		if m.controlBusy {
+			return m, nil
+		}
+		switch key {
 		case "r":
 			if m.loading {
 				return m, nil
@@ -104,14 +142,55 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.verbose = !m.verbose
 		case "h", "?":
 			m.showHelp = !m.showHelp
+		case "j", "down":
+			if m.metrics != nil && m.selectedSession+1 < len(m.metrics.Active) {
+				m.selectedSession++
+			}
+		case "k", "up":
+			if m.selectedSession > 0 {
+				m.selectedSession--
+			}
+		case "x":
+			if m.metrics == nil || len(m.metrics.Active) == 0 {
+				m.notice = "No unresolved session selected"
+				break
+			}
+			m.pending = &controlAction{
+				kind: controlTerminate,
+				code: m.metrics.Active[m.selectedSession].Code,
+			}
+		case "d":
+			if m.metrics == nil {
+				m.notice = "Control state is not loaded"
+				break
+			}
+			m.pending = &controlAction{
+				kind:     controlDrain,
+				draining: !m.metrics.Control.Draining,
+			}
 		}
 	case metricsMsg:
 		m.metrics = msg.metrics
 		m.err = nil
 		m.loading = false
+		if len(m.metrics.Active) == 0 {
+			m.selectedSession = 0
+		} else if m.selectedSession >= len(m.metrics.Active) {
+			m.selectedSession = len(m.metrics.Active) - 1
+		}
 	case errMsg:
 		m.err = msg.err
 		m.loading = false
+	case controlMsg:
+		m.controlBusy = false
+		if msg.err != nil {
+			m.err = msg.err
+			m.notice = "Operator action failed"
+			return m, nil
+		}
+		m.notice = msg.message
+		m.loading = true
+		return m, fetchMetricsCmd(m.collector)
 	case tickMsg:
 		cmds := []tea.Cmd{tickCmd(m.refresh)}
 		if !m.loading {
@@ -125,7 +204,7 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m dashboardModel) View() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render("wormzy relay dashboard"))
+	b.WriteString(headerStyle.Render("wormzy operator console"))
 	b.WriteString("\n")
 
 	switch {
@@ -139,9 +218,13 @@ func (m dashboardModel) View() string {
 		if m.showHelp {
 			b.WriteString(renderHelp())
 		} else {
+			b.WriteString(renderServicePanel(m.metrics))
+			b.WriteString("\n\n")
 			b.WriteString(renderSummary(m.metrics, m.loading, m.verbose))
 			b.WriteString("\n\n")
-			b.WriteString(renderSessionPanels(m.metrics, m.verbose))
+			b.WriteString(renderSessionPanels(m.metrics, m.verbose, m.selectedSession))
+			b.WriteString("\n\n")
+			b.WriteString(renderControlPanel(m.metrics, m.pending, m.controlBusy, m.notice, m.selectedSession))
 			if m.err != nil {
 				b.WriteString("\n\n")
 				b.WriteString(renderErrorPanel(m.err))
@@ -162,6 +245,11 @@ type errMsg struct {
 }
 
 type tickMsg struct{}
+
+type controlMsg struct {
+	message string
+	err     error
+}
 
 func fetchMetricsCmd(mc *transport.MetricsCollector) tea.Cmd {
 	return func() tea.Msg {
@@ -184,6 +272,93 @@ func tickCmd(interval time.Duration) tea.Cmd {
 	})
 }
 
+func executeControlCmd(mc *transport.MetricsCollector, action controlAction) tea.Cmd {
+	return func() tea.Msg {
+		if mc == nil {
+			return controlMsg{err: fmt.Errorf("operator controls are not configured")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		switch action.kind {
+		case controlDrain:
+			if err := mc.SetDraining(ctx, action.draining); err != nil {
+				return controlMsg{err: err}
+			}
+			if action.draining {
+				return controlMsg{message: "New sessions are now draining"}
+			}
+			return controlMsg{message: "New sessions are now accepted"}
+		case controlTerminate:
+			if err := mc.TerminateSession(ctx, action.code); err != nil {
+				return controlMsg{err: err}
+			}
+			return controlMsg{message: fmt.Sprintf("Session %s removed", action.code)}
+		default:
+			return controlMsg{err: fmt.Errorf("unknown operator action %q", action.kind)}
+		}
+	}
+}
+
+func renderServicePanel(metrics *transport.RelayMetrics) string {
+	intake := successStyle.Render("ACCEPTING")
+	if metrics.Control.Draining {
+		intake = warningStyle.Render("DRAINING")
+	}
+	lines := []string{
+		titleStyle.Render("Server status"),
+		fmt.Sprintf("Intake  %s    Redis  %s", intake, subtleStyle.Render(metrics.RedisLatency.Round(time.Microsecond).String())),
+		"",
+	}
+	for _, service := range metrics.Services {
+		serviceName := safeTerminalText(service.Name)
+		status := errorStyle.Render("no heartbeat")
+		if service.Online {
+			status = successStyle.Render("online")
+		}
+		switch serviceName {
+		case "mailbox":
+			lines = append(lines, fmt.Sprintf(
+				"%-8s %-14s uptime %s",
+				serviceName,
+				status,
+				humanDuration(service.Uptime),
+			))
+			lines = append(lines, fmt.Sprintf(
+				"  %d requests • %d active • %d errors",
+				service.Requests,
+				service.ActiveRequests,
+				service.RequestErrors,
+			))
+		case "relay":
+			lines = append(lines, fmt.Sprintf(
+				"%-8s %-14s uptime %s",
+				serviceName,
+				status,
+				humanDuration(service.Uptime),
+			))
+			lines = append(lines, fmt.Sprintf(
+				"  %d connections active (%d total) • %d waiting • %d pairs active (%d done)",
+				service.ActiveConnections,
+				service.Connections,
+				service.WaitingPeers,
+				service.ActivePairs,
+				service.CompletedPairs,
+			))
+			lines = append(lines, fmt.Sprintf(
+				"  %s relayed • %d errors",
+				formatBytes(service.BytesRelayed),
+				service.Errors,
+			))
+		default:
+			lines = append(lines, fmt.Sprintf("%-8s %-14s uptime %s", serviceName, status, humanDuration(service.Uptime)))
+		}
+		if service.LastError != "" {
+			lines = append(lines, "         last error: "+errorStyle.Render(truncateMiddle(safeTerminalText(service.LastError), 96)))
+		}
+	}
+	return bubbleBoxStyle.Render(strings.Join(lines, "\n"))
+}
+
 func renderSummary(metrics *transport.RelayMetrics, loading bool, verbose bool) string {
 	var lines []string
 
@@ -196,7 +371,7 @@ func renderSummary(metrics *transport.RelayMetrics, loading bool, verbose bool) 
 
 	// Header with P2P rate indicator
 	p2pIndicator := renderP2PIndicator(p2pRate, totalCompleted)
-	lines = append(lines, titleStyle.Render("📊 Overall Statistics"))
+	lines = append(lines, titleStyle.Render("Transfer telemetry (current TTL window)"))
 	lines = append(lines, "")
 	lines = append(lines, p2pIndicator)
 	lines = append(lines, "")
@@ -281,23 +456,23 @@ func renderP2PIndicator(rate float64, total int) string {
 		subtleStyle.Render(fmt.Sprintf("(%s)", label)))
 }
 
-func renderSessionPanels(metrics *transport.RelayMetrics, verbose bool) string {
-	active := renderSessionList("Active sessions", metrics.Active, metrics.Generated, true, verbose)
-	recent := renderSessionList("Recent transfers", metrics.Recent, metrics.Generated, false, verbose)
+func renderSessionPanels(metrics *transport.RelayMetrics, verbose bool, selected int) string {
+	active := renderSessionList("Live / unresolved sessions", metrics.Active, metrics.Generated, true, verbose, selected)
+	recent := renderSessionList("Recent activity", metrics.Recent, metrics.Generated, false, verbose, -1)
 	debug := renderDebugPanel(metrics, verbose)
 	return lipgloss.JoinVertical(lipgloss.Left, active, recent, debug)
 }
 
-func renderSessionList(title string, sessions []transport.SessionSnapshot, ref time.Time, showTTL bool, verbose bool) string {
+func renderSessionList(title string, sessions []transport.SessionSnapshot, ref time.Time, showTTL bool, verbose bool, selected int) string {
 	var rows []string
 	if verbose {
 		rows = []string{
-			fmt.Sprintf("%-12s %-12s %-10s %-10s %-12s %s",
+			"  " + fmt.Sprintf("%-12s %-12s %-10s %-10s %-12s %s",
 				"Code", "State", "Size", "Duration", "Candidate", columnLabel(showTTL)),
 		}
 	} else {
 		rows = []string{
-			fmt.Sprintf("%-12s %-10s %-10s %-10s %s",
+			"  " + fmt.Sprintf("%-12s %-10s %-10s %-10s %s",
 				"Code", "State", "Size", "Duration", columnLabel(showTTL)),
 		}
 	}
@@ -305,12 +480,51 @@ func renderSessionList(title string, sessions []transport.SessionSnapshot, ref t
 	if len(sessions) == 0 {
 		rows = append(rows, subtleStyle.Render("no sessions to display"))
 	} else {
-		for _, sess := range sessions {
-			rows = append(rows, renderSessionRow(sess, ref, showTTL, verbose))
+		for i, sess := range sessions {
+			marker := "  "
+			if i == selected {
+				marker = successStyle.Render("› ")
+			}
+			rows = append(rows, marker+renderSessionRow(sess, ref, showTTL, verbose))
 		}
 	}
 	body := titleStyle.Render(title) + "\n" + strings.Join(rows, "\n")
 	return bubbleBoxStyle.Render(body)
+}
+
+func renderControlPanel(metrics *transport.RelayMetrics, pending *controlAction, busy bool, notice string, selected int) string {
+	intake := successStyle.Render("accepting new sessions")
+	if metrics.Control.Draining {
+		intake = warningStyle.Render("draining new sessions")
+	}
+	selectedCode := "none"
+	if len(metrics.Active) > 0 && selected >= 0 && selected < len(metrics.Active) {
+		selectedCode = truncateMiddle(safeTerminalText(metrics.Active[selected].Code), 32)
+	}
+	lines := []string{
+		titleStyle.Render("Operator controls"),
+		fmt.Sprintf("Intake: %s    Selected: %s", intake, selectedCode),
+		"j/k select • x terminate selected session • d toggle drain mode",
+	}
+	if busy {
+		lines = append(lines, warningStyle.Render("Applying operator action…"))
+	} else if pending != nil {
+		var prompt string
+		switch pending.kind {
+		case controlTerminate:
+			prompt = fmt.Sprintf("Remove session %s? This cannot stop an established P2P connection.", truncateMiddle(safeTerminalText(pending.code), 32))
+		case controlDrain:
+			if pending.draining {
+				prompt = "Stop accepting new sessions? Existing transfers are left alone."
+			} else {
+				prompt = "Resume accepting new sessions?"
+			}
+		}
+		lines = append(lines, warningStyle.Render(prompt+"  y confirm • n cancel"))
+	} else if notice != "" {
+		lines = append(lines, subtleStyle.Render(safeTerminalText(notice)))
+	}
+	return bubbleBoxStyle.Render(strings.Join(lines, "\n"))
 }
 
 func columnLabel(showTTL bool) string {
@@ -321,17 +535,18 @@ func columnLabel(showTTL bool) string {
 }
 
 func renderSessionRow(sess transport.SessionSnapshot, ref time.Time, showTTL bool, verbose bool) string {
-	state := prettifyState(sess.State)
+	code := truncateMiddle(safeTerminalText(sess.Code), 24)
+	state := prettifyState(safeTerminalText(sess.State))
 	trailing := humanDuration(sessionTrailing(sess, ref, showTTL))
 
 	if verbose {
-		candidate := sess.Candidate
+		candidate := truncateMiddle(safeTerminalText(sess.Candidate), 24)
 		if candidate == "" {
 			candidate = "-"
 		}
 		return fmt.Sprintf(
 			"%-12s %-12s %-10s %-10s %-12s %s",
-			sess.Code,
+			code,
 			stateStyle(state),
 			formatBytes(sess.Bytes),
 			humanDuration(sess.Duration),
@@ -342,7 +557,7 @@ func renderSessionRow(sess transport.SessionSnapshot, ref time.Time, showTTL boo
 
 	return fmt.Sprintf(
 		"%-12s %-10s %-10s %-10s %s",
-		sess.Code,
+		code,
 		stateStyle(state),
 		formatBytes(sess.Bytes),
 		humanDuration(sess.Duration),
@@ -424,7 +639,7 @@ func summarizeCountMap(counts map[string]int, limit int) string {
 		if count <= 0 {
 			continue
 		}
-		items = append(items, bucket{key: key, count: count})
+		items = append(items, bucket{key: truncateMiddle(safeTerminalText(key), 64), count: count})
 	}
 	if len(items) == 0 {
 		return subtleStyle.Render("(none)")
@@ -447,15 +662,16 @@ func summarizeCountMap(counts map[string]int, limit int) string {
 
 func renderFailureRow(sess transport.SessionSnapshot, ref time.Time, verbose bool) string {
 	when := humanDuration(sessionTrailing(sess, ref, false))
-	candidate := sess.Candidate
+	code := truncateMiddle(safeTerminalText(sess.Code), 24)
+	candidate := truncateMiddle(safeTerminalText(sess.Candidate), 24)
 	if candidate == "" {
 		candidate = "unknown"
 	}
-	outcome := sess.DirectOutcome
+	outcome := truncateMiddle(safeTerminalText(sess.DirectOutcome), 24)
 	if outcome == "" {
 		outcome = "unknown"
 	}
-	errMsg := sess.Error
+	errMsg := safeTerminalText(sess.Error)
 	if errMsg == "" {
 		errMsg = "n/a"
 	}
@@ -464,7 +680,7 @@ func renderFailureRow(sess transport.SessionSnapshot, ref time.Time, verbose boo
 		errMsg = truncateMiddle(errMsg, 80)
 		return fmt.Sprintf(
 			"%s %s cand=%s outcome=%s\n    error: %s",
-			sess.Code,
+			code,
 			subtleStyle.Render(when+" ago"),
 			candidate,
 			outcome,
@@ -475,7 +691,7 @@ func renderFailureRow(sess transport.SessionSnapshot, ref time.Time, verbose boo
 	errMsg = truncateMiddle(errMsg, 56)
 	return fmt.Sprintf(
 		"%s %s cand=%s outcome=%s err=%s",
-		sess.Code,
+		code,
 		subtleStyle.Render(when+" ago"),
 		candidate,
 		outcome,
@@ -509,7 +725,16 @@ func sessionTrailing(sess transport.SessionSnapshot, ref time.Time, showTTL bool
 }
 
 func renderErrorPanel(err error) string {
-	return errorBoxStyle.Render(errorStyle.Render("Relay metrics error") + "\n" + err.Error())
+	return errorBoxStyle.Render(errorStyle.Render("Relay metrics error") + "\n" + safeTerminalText(err.Error()))
+}
+
+func safeTerminalText(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			return -1
+		}
+		return r
+	}, value)
 }
 
 func renderFooter(updated time.Time, loading bool, verbose bool) string {
@@ -521,20 +746,29 @@ func renderFooter(updated time.Time, loading bool, verbose bool) string {
 	if verbose {
 		mode = "verbose"
 	}
-	status += fmt.Sprintf(" • Mode: %s • Press h for help, q to exit", mode)
+	status += fmt.Sprintf(" • Mode: %s • h help • r refresh • q exit", mode)
 	return subtleStyle.Render(status)
 }
 
 func renderHelp() string {
 	help := []string{
-		headerStyle.Render("wormzy relay dashboard - help"),
+		headerStyle.Render("wormzy operator console - help"),
 		"",
 		titleStyle.Render("Keyboard Shortcuts"),
 		"",
 		"  r         Refresh metrics now",
 		"  v         Toggle verbose/compact mode",
+		"  j/k       Select a live or unresolved session",
+		"  x         Terminate the selected rendezvous session",
+		"  d         Toggle drain mode for new sessions",
+		"  y/n       Confirm or cancel an operator action",
 		"  h or ?    Toggle this help screen",
 		"  q         Quit dashboard",
+		"",
+		warningStyle.Render("Control boundaries:"),
+		"  • Controls require the same privileged Redis access as this console",
+		"  • Drain mode leaves existing transfers alone",
+		"  • Removing a session cannot stop an established direct P2P connection",
 		"",
 		titleStyle.Render("Understanding Metrics"),
 		"",

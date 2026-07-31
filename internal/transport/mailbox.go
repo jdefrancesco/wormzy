@@ -92,6 +92,13 @@ func startEmbeddedMailbox(ttl time.Duration, role string) (*redisMailbox, error)
 
 func (m *redisMailbox) Claim(ctx context.Context, requested string) (string, error) {
 	if m.role == "send" {
+		control, err := readOperatorControl(ctx, m.client, m.prefix)
+		if err != nil {
+			return "", err
+		}
+		if control.Draining {
+			return "", errServiceDraining
+		}
 		code := requested
 		for {
 			if code == "" {

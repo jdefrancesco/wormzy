@@ -16,8 +16,9 @@ import (
 // RelayServer relays QUIC streams between paired clients that share a code+token.
 // Payloads stay Noise-encrypted end-to-end; the server only forwards bytes.
 type RelayServer struct {
-	Addr   string
-	Logger *slog.Logger
+	Addr      string
+	Logger    *slog.Logger
+	Telemetry *ServiceTelemetry
 
 	mu      sync.Mutex
 	waiting map[string]*relayServerClient
@@ -66,6 +67,7 @@ func (s *RelayServer) ListenAndServe(ctx context.Context) error {
 				return ctx.Err()
 			}
 			s.log().Warn("relay accept", "err", err)
+			s.Telemetry.RecordError(err)
 			continue
 		}
 		go s.handleConn(ctx, conn)
@@ -73,14 +75,18 @@ func (s *RelayServer) ListenAndServe(ctx context.Context) error {
 }
 
 func (s *RelayServer) handleConn(ctx context.Context, conn *quic.Conn) {
+	s.Telemetry.ConnectionOpened()
+	defer s.Telemetry.ConnectionClosed()
 	stream, err := conn.AcceptStream(ctx)
 	if err != nil {
+		s.Telemetry.RecordError(err)
 		_ = conn.CloseWithError(0, "")
 		return
 	}
 	var hello relayHello
 	if err := json.NewDecoder(stream).Decode(&hello); err != nil {
 		s.log().Warn("relay hello decode", "err", err)
+		s.Telemetry.RecordError(err)
 		_ = conn.CloseWithError(0, "")
 		return
 	}
@@ -100,6 +106,8 @@ func (s *RelayServer) handleConn(ctx context.Context, conn *quic.Conn) {
 		_ = conn.CloseWithError(0, "")
 		return
 	}
+	s.Telemetry.PairStarted()
+	defer s.Telemetry.PairFinished()
 	defer pair.a.conn.CloseWithError(0, "")
 	defer pair.b.conn.CloseWithError(0, "")
 
@@ -118,10 +126,10 @@ func (s *RelayServer) handleConn(ctx context.Context, conn *quic.Conn) {
 	_ = sendRelayReady(ctxPair, pair.a.conn)
 	_ = sendRelayReady(ctxPair, pair.b.conn)
 
-	go mirrorBidi(ctxPair, pair.a.conn, pair.b.conn)
-	go mirrorBidi(ctxPair, pair.b.conn, pair.a.conn)
-	go mirrorUni(ctxPair, pair.a.conn, pair.b.conn)
-	go mirrorUni(ctxPair, pair.b.conn, pair.a.conn)
+	go mirrorBidi(ctxPair, pair.a.conn, pair.b.conn, s.Telemetry)
+	go mirrorBidi(ctxPair, pair.b.conn, pair.a.conn, s.Telemetry)
+	go mirrorUni(ctxPair, pair.a.conn, pair.b.conn, s.Telemetry)
+	go mirrorUni(ctxPair, pair.b.conn, pair.a.conn, s.Telemetry)
 
 	<-ctxPair.Done()
 }
@@ -139,16 +147,21 @@ func (s *RelayServer) register(client *relayServerClient) *relayPair {
 	}
 	if other, ok := s.waiting[client.hello.Code]; ok {
 		if other.hello.Token != client.hello.Token {
+			err := fmt.Errorf("relay token mismatch for code %s", client.hello.Code)
 			_ = other.conn.CloseWithError(0, "relay token mismatch")
 			_ = client.conn.CloseWithError(0, "relay token mismatch")
 			delete(s.waiting, client.hello.Code)
+			s.Telemetry.SetWaitingPeers(len(s.waiting))
+			s.Telemetry.RecordError(err)
 			return nil
 		}
 		delete(s.waiting, client.hello.Code)
+		s.Telemetry.SetWaitingPeers(len(s.waiting))
 		s.log().Info("relay paired", "code", client.hello.Code)
 		return &relayPair{a: other, b: client}
 	}
 	s.waiting[client.hello.Code] = client
+	s.Telemetry.SetWaitingPeers(len(s.waiting))
 	s.log().Info("relay waiting", "code", client.hello.Code)
 	return nil
 }
@@ -162,6 +175,7 @@ func (s *RelayServer) unregisterWaiting(client *relayServerClient) {
 	existing, ok := s.waiting[client.hello.Code]
 	if ok && existing == client {
 		delete(s.waiting, client.hello.Code)
+		s.Telemetry.SetWaitingPeers(len(s.waiting))
 	}
 }
 
@@ -174,7 +188,7 @@ func sendRelayReady(ctx context.Context, conn *quic.Conn) error {
 	return json.NewEncoder(us).Encode(map[string]string{"status": "ready"})
 }
 
-func mirrorBidi(ctx context.Context, src, dst *quic.Conn) {
+func mirrorBidi(ctx context.Context, src, dst *quic.Conn, telemetry *ServiceTelemetry) {
 	for {
 		stream, err := src.AcceptStream(ctx)
 		if err != nil {
@@ -185,11 +199,11 @@ func mirrorBidi(ctx context.Context, src, dst *quic.Conn) {
 			stream.CancelRead(0)
 			return
 		}
-		go proxyStream(stream, target)
+		go proxyStream(stream, target, telemetry)
 	}
 }
 
-func mirrorUni(ctx context.Context, src, dst *quic.Conn) {
+func mirrorUni(ctx context.Context, src, dst *quic.Conn, telemetry *ServiceTelemetry) {
 	for {
 		us, err := src.AcceptUniStream(ctx)
 		if err != nil {
@@ -201,18 +215,21 @@ func mirrorUni(ctx context.Context, src, dst *quic.Conn) {
 			return
 		}
 		go func(r *quic.ReceiveStream, w *quic.SendStream) {
-			_, _ = io.Copy(w, r)
+			n, _ := io.Copy(w, r)
+			telemetry.AddRelayBytes(n)
 			_ = w.Close()
 		}(us, ds)
 	}
 }
 
-func proxyStream(a *quic.Stream, b *quic.Stream) {
+func proxyStream(a *quic.Stream, b *quic.Stream, telemetry *ServiceTelemetry) {
 	go func() {
-		_, _ = io.Copy(b, a)
+		n, _ := io.Copy(b, a)
+		telemetry.AddRelayBytes(n)
 		_ = b.Close()
 	}()
-	_, _ = io.Copy(a, b)
+	n, _ := io.Copy(a, b)
+	telemetry.AddRelayBytes(n)
 	_ = a.Close()
 }
 

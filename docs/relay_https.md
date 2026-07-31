@@ -10,6 +10,8 @@ The file data path is separate:
 - direct path: UDP/QUIC peer-to-peer
 - fallback path: `cmd/relay` on UDP/3478 forwarding encrypted QUIC streams
 
+The mailbox and relay publish process heartbeats and activity counters to Redis for the operator console. Configure the relay with `WORMZY_RELAY_REDIS`, `WORMZY_METRICS_REDIS`, or the same `WORMZY_MAILBOX_REDIS` used by the mailbox. The Redis endpoint remains private; no public administration route is added.
+
 ### 1. Bind the mailbox locally
 
 The systemd unit under `deploy/systemd/wormzy-mailbox.service` now defaults to

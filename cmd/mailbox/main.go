@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/jdefrancesco/wormzy/internal/transport"
@@ -21,6 +24,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to init server: %v", err)
 	}
+	defer server.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	opsDone := make(chan struct{})
+	go func() {
+		defer close(opsDone)
+		server.RunOperations(ctx, 5*time.Second)
+	}()
 	log.Printf("wormzy relay proxy listening on %s (redis %s)", *listen, *redisURL)
 	srv := &http.Server{
 		Addr:    *listen,
@@ -32,7 +43,18 @@ func main() {
 		WriteTimeout: 0,
 		IdleTimeout:  60 * time.Second,
 	}
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("mailbox shutdown: %v", err)
+		}
+	}()
+	err = srv.ListenAndServe()
+	stop()
+	<-opsDone
+	if err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }

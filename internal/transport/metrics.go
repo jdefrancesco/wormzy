@@ -27,6 +27,9 @@ type MetricsCollector struct {
 // RelayMetrics captures system-wide counters plus representative session slices.
 type RelayMetrics struct {
 	Generated          time.Time
+	RedisLatency       time.Duration
+	Control            OperatorControl
+	Services           []ServiceSnapshot
 	TotalSessions      int
 	ActiveSessions     int
 	WaitingForSender   int
@@ -44,6 +47,36 @@ type RelayMetrics struct {
 	Active             []SessionSnapshot
 	Recent             []SessionSnapshot
 	RecentFailures     []SessionSnapshot
+}
+
+// OperatorControl is the global intake state shared by the mailbox, relay, and
+// privileged dashboard.
+type OperatorControl struct {
+	Draining  bool
+	UpdatedAt time.Time
+	UpdatedBy string
+}
+
+// ServiceSnapshot is the last heartbeat and activity counters for one server
+// process. Counters cover the current process lifetime.
+type ServiceSnapshot struct {
+	Name              string
+	Online            bool
+	Draining          bool
+	StartedAt         time.Time
+	UpdatedAt         time.Time
+	Uptime            time.Duration
+	Requests          uint64
+	RequestErrors     uint64
+	ActiveRequests    int64
+	Connections       uint64
+	ActiveConnections int64
+	WaitingPeers      int
+	ActivePairs       int64
+	CompletedPairs    uint64
+	BytesRelayed      int64
+	Errors            uint64
+	LastError         string
 }
 
 // SessionSnapshot summarizes a single rendezvous session for dashboards.
@@ -102,6 +135,21 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 		CandidateCount:     make(map[string]int),
 		ErrorCount:         make(map[string]int),
 	}
+	pingStarted := time.Now()
+	if err := mc.client.Ping(ctx).Err(); err != nil {
+		return nil, fmt.Errorf("redis health: %w", err)
+	}
+	report.RedisLatency = time.Since(pingStarted)
+	control, err := mc.collectControl(ctx)
+	if err != nil {
+		return nil, err
+	}
+	report.Control = control
+	services, err := mc.collectServices(ctx, report.Generated)
+	if err != nil {
+		return nil, err
+	}
+	report.Services = services
 	var totalDuration time.Duration
 	pattern := fmt.Sprintf("%s:sessions:*", mc.prefix)
 	var cursor uint64
@@ -116,7 +164,11 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 			if err != nil {
 				return nil, err
 			}
-			for _, raw := range values {
+			ttls, err := mc.sessionTTLs(ctx, keys)
+			if err != nil {
+				return nil, err
+			}
+			for i, raw := range values {
 				if raw == nil {
 					continue
 				}
@@ -130,6 +182,10 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 				}
 				report.TotalSessions++
 				snap := snapshotFromSession(&sess, report.Generated)
+				if ttls[i] > 0 {
+					snap.TTLRemaining = ttls[i]
+					snap.ExpiresAt = report.Generated.Add(ttls[i])
+				}
 				if sess.Stats == nil {
 					report.ActiveSessions++
 					if snap.HasSender && !snap.HasReceiver {
@@ -194,6 +250,137 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 		}
 	}
 	return report, nil
+}
+
+func (mc *MetricsCollector) controlKey() string {
+	return operatorControlKey(mc.prefix)
+}
+
+func (mc *MetricsCollector) serviceKey(name string) string {
+	return fmt.Sprintf("%s:ops:services:%s", mc.prefix, name)
+}
+
+func (mc *MetricsCollector) collectControl(ctx context.Context) (OperatorControl, error) {
+	record, err := readOperatorControl(ctx, mc.client, mc.prefix)
+	if err != nil {
+		return OperatorControl{}, err
+	}
+	control := OperatorControl{Draining: record.Draining, UpdatedBy: record.UpdatedBy}
+	if record.UpdatedUnix > 0 {
+		control.UpdatedAt = time.Unix(record.UpdatedUnix, 0)
+	}
+	return control, nil
+}
+
+func (mc *MetricsCollector) collectServices(ctx context.Context, now time.Time) ([]ServiceSnapshot, error) {
+	names := []string{"mailbox", "relay"}
+	keys := make([]string, 0, len(names))
+	for _, name := range names {
+		keys = append(keys, mc.serviceKey(name))
+	}
+	values, err := mc.client.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, fmt.Errorf("read service telemetry: %w", err)
+	}
+	services := make([]ServiceSnapshot, 0, len(names))
+	for i, name := range names {
+		snap := ServiceSnapshot{Name: name}
+		if values[i] == nil {
+			services = append(services, snap)
+			continue
+		}
+		data, err := bytesFromInterface(values[i])
+		if err != nil {
+			return nil, fmt.Errorf("decode %s telemetry: %w", name, err)
+		}
+		var record serviceTelemetryRecord
+		if err := json.Unmarshal(data, &record); err != nil {
+			return nil, fmt.Errorf("decode %s telemetry: %w", name, err)
+		}
+		snap = serviceSnapshotFromRecord(record, now)
+		services = append(services, snap)
+	}
+	return services, nil
+}
+
+func serviceSnapshotFromRecord(record serviceTelemetryRecord, now time.Time) ServiceSnapshot {
+	started := time.Unix(record.StartedUnix, 0)
+	updated := time.Unix(record.UpdatedUnix, 0)
+	uptime := now.Sub(started)
+	if uptime < 0 {
+		uptime = 0
+	}
+	return ServiceSnapshot{
+		Name:              record.Name,
+		Online:            !updated.IsZero() && now.Sub(updated) <= serviceHeartbeatTTL,
+		Draining:          record.Draining,
+		StartedAt:         started,
+		UpdatedAt:         updated,
+		Uptime:            uptime,
+		Requests:          record.Requests,
+		RequestErrors:     record.RequestErrors,
+		ActiveRequests:    record.ActiveRequests,
+		Connections:       record.Connections,
+		ActiveConnections: record.ActiveConnections,
+		WaitingPeers:      record.WaitingPeers,
+		ActivePairs:       record.ActivePairs,
+		CompletedPairs:    record.CompletedPairs,
+		BytesRelayed:      record.BytesRelayed,
+		Errors:            record.Errors,
+		LastError:         record.LastError,
+	}
+}
+
+func (mc *MetricsCollector) sessionTTLs(ctx context.Context, keys []string) ([]time.Duration, error) {
+	pipe := mc.client.Pipeline()
+	cmds := make([]*redis.DurationCmd, 0, len(keys))
+	for _, key := range keys {
+		cmds = append(cmds, pipe.PTTL(ctx, key))
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("read session TTLs: %w", err)
+	}
+	ttls := make([]time.Duration, len(cmds))
+	for i, cmd := range cmds {
+		ttls[i] = cmd.Val()
+	}
+	return ttls, nil
+}
+
+// SetDraining enables or disables acceptance of new sessions. Redis access is
+// the authorization boundary for this operator action.
+func (mc *MetricsCollector) SetDraining(ctx context.Context, draining bool) error {
+	record := operatorControlRecord{
+		Draining:    draining,
+		UpdatedUnix: time.Now().Unix(),
+		UpdatedBy:   "dashboard",
+	}
+	payload, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("marshal operator control: %w", err)
+	}
+	if err := mc.client.Set(ctx, mc.controlKey(), payload, 0).Err(); err != nil {
+		return fmt.Errorf("set drain state: %w", err)
+	}
+	return nil
+}
+
+// TerminateSession removes one rendezvous session. It cannot terminate an
+// already-established direct P2P connection, which no longer traverses Redis.
+func (mc *MetricsCollector) TerminateSession(ctx context.Context, code string) error {
+	code = strings.TrimSpace(code)
+	if code == "" || len(code) > 128 || strings.ContainsAny(code, "\r\n") {
+		return fmt.Errorf("invalid session code")
+	}
+	key := fmt.Sprintf("%s:sessions:%s", mc.prefix, code)
+	deleted, err := mc.client.Del(ctx, key).Result()
+	if err != nil {
+		return fmt.Errorf("terminate session %s: %w", code, err)
+	}
+	if deleted == 0 {
+		return fmt.Errorf("terminate session %s: %w", code, errSessionNotFound)
+	}
+	return nil
 }
 
 func normalizeMetricsLabel(v, fallback string) string {

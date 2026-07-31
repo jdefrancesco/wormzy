@@ -25,7 +25,7 @@ It's primary features include:
 - Defaults: Baked-in HTTPS mailbox endpoint, STUN list, best-effort UPnP port mapping, and optional QUIC relay fallback; Magic Wormhole typically needs a relay URL or uses the Python community relay.
 - UX: Bubble Tea TUI with headless fallback; Magic Wormhole is plain CLI.
 - File safety: Collision-safe saves (`name (wormzy-1).txt`) and disk-space preflight; Magic Wormhole overwrites unless redirected.
-- Metrics: Built-in dashboard over Redis showing P2P vs relay; Magic Wormhole doesn’t expose relay/session metrics.
+- Operations: Redis-backed operator console showing mailbox health, live QUIC relay activity, recent P2P/relay outcomes, and guarded session controls.
 
 ## Quick Start
 
@@ -75,6 +75,14 @@ the balanced two-host workflow in [`docs/UPNP-AB-TEST.md`](docs/UPNP-AB-TEST.md)
 ## Deploying updated binaries
 
 On a server with the `systemd` units installed, run `make deploy`. It builds the binaries, installs them to `/usr/local/bin`, reloads systemd, and restarts `wormzy-mailbox`, `wormzy-rendezvous`, and `wormzy-relay` (ignored if those services are absent).
+
+Run the operator console anywhere that has privileged access to the production Redis instance:
+
+```bash
+WORMZY_METRICS_REDIS='rediss://user:password@redis.example:6379' ./bin/dashboard
+```
+
+It displays mailbox and relay heartbeats, current server load, relay bytes, unresolved sessions, and recent transfer outcomes. Press `d` to confirm drain/resume of new sessions, or select an unresolved session with `j`/`k` and press `x` to remove it. See [`docs/OPERATOR-CONSOLE.md`](docs/OPERATOR-CONSOLE.md) for deployment and safety details.
 
 ## Endpoint defaults
 
