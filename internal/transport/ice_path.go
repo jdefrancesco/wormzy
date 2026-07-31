@@ -43,6 +43,15 @@ type icePacketConn struct {
 	conn *ice.Conn
 }
 
+type quicConnectionCloser interface {
+	Context() context.Context
+	CloseWithError(quic.ApplicationErrorCode, string) error
+}
+
+type iceResourceCloser interface {
+	Close() error
+}
+
 type iceURLSet struct {
 	urls    []*pionstun.URI
 	hasSTUN bool
@@ -88,6 +97,35 @@ func (p *icePacketConn) SetReadBuffer(n int) error {
 
 func (p *icePacketConn) SetWriteBuffer(n int) error {
 	return nil
+}
+
+func finishQUICConnection(ctx context.Context, conn quicConnectionCloser, mode string) {
+	if conn == nil {
+		return
+	}
+	if mode == "recv" {
+		_ = conn.CloseWithError(0, "wormzy transfer complete")
+		return
+	}
+	select {
+	case <-conn.Context().Done():
+		return
+	case <-ctx.Done():
+		_ = conn.CloseWithError(0, "wormzy transfer complete")
+	}
+}
+
+func newICEQUICCleanup(packet, transport, agent iceResourceCloser) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			for _, resource := range []iceResourceCloser{packet, transport, agent} {
+				if resource != nil {
+					_ = resource.Close()
+				}
+			}
+		})
+	}
 }
 
 func peerSupportsFeature(info rendezvous.SelfInfo, feature string) bool {
@@ -421,11 +459,7 @@ func attemptICEQUICSession(ctx context.Context, cfg Config, mbox mailbox, rep Re
 		return nil, err
 	}
 
-	cleanup := func() {
-		_ = ln.Close()
-		_ = quicTransport.Close()
-		_ = agent.Close()
-	}
+	cleanup := newICEQUICCleanup(packetConn, quicTransport, agent)
 
 	var (
 		quicConn  *quic.Conn

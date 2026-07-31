@@ -51,6 +51,8 @@ const (
 	relayFallbackDelay    = 4 * time.Second
 	relayRetryDelay       = 3 * time.Second
 	relayAttemptTimeout   = 6 * time.Second
+	statsReportTimeout    = 5 * time.Second
+	quicFinishTimeout     = 3 * time.Second
 
 	// Wire-format sizing limits.
 	maxUint16PayloadLen = (1 << 16) - 1
@@ -254,21 +256,9 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		Candidate: initialCandidate.Type,
 		Transport: transportLabelForCandidate(initialCandidate),
 	}
+	var sessionCleanup func()
 	defer func() {
-		if mbox == nil {
-			return
-		}
-		stats.Completed = finalErr == nil
-		if finalErr != nil {
-			stats.Error = finalErr.Error()
-		}
-		stats.DurationMillis = time.Since(started).Milliseconds()
-		if res != nil {
-			stats.Bytes = res.FileSize
-		}
-		if err := mbox.ReportStats(ctx, stats); err != nil {
-			reporter.Logf("report stats failed: %v", err)
-		}
+		finalizeTransfer(mbox, stats, res, finalErr, started, sessionCleanup, reporter)
 	}()
 
 	if !cfg.Loopback {
@@ -276,7 +266,7 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		iceSession, iceErr := attemptICEQUICSession(ctx, cfg, mbox, reporter, peer)
 		switch {
 		case iceErr == nil && iceSession != nil:
-			defer iceSession.cleanup()
+			sessionCleanup = iceSession.cleanup
 			stats.Candidate = iceSession.candidate.Type
 			stats.Transport = transportLabelForCandidate(iceSession.candidate)
 			stats.DirectOutcome = "won"
@@ -332,6 +322,10 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 				reporter.Logf("saved file to %s", path)
 				reporter.Stage(StageTransfer, StageStateDone, path)
 			}
+
+			finishCtx, cancelFinish := context.WithTimeout(context.Background(), quicFinishTimeout)
+			finishQUICConnection(finishCtx, iceSession.conn, cfg.Mode)
+			cancelFinish()
 
 			return res, nil
 		case errors.Is(iceErr, errICESkipped):
@@ -819,6 +813,46 @@ waitLoop:
 	}
 
 	return res, nil
+}
+
+func finalizeTransfer(
+	mbox mailbox,
+	stats transferStats,
+	res *Result,
+	finalErr error,
+	started time.Time,
+	cleanup func(),
+	rep Reporter,
+) {
+	if mbox != nil {
+		stats.Completed = finalErr == nil
+		if finalErr != nil {
+			stats.Error = finalErr.Error()
+		}
+		stats.DurationMillis = time.Since(started).Milliseconds()
+		if res != nil {
+			stats.Bytes = res.FileSize
+		}
+
+		statsCtx, cancel := context.WithTimeout(context.Background(), statsReportTimeout)
+		err := mbox.ReportStats(statsCtx, stats)
+		cancel()
+		if err != nil {
+			if rep != nil {
+				rep.Logf("report stats failed: %v", err)
+			}
+		} else if rep != nil {
+			rep.Logf(
+				"session/stats completed=%t transport=%s candidate=%s",
+				stats.Completed,
+				stats.Transport,
+				stats.Candidate,
+			)
+		}
+	}
+	if cleanup != nil {
+		cleanup()
+	}
 }
 
 func (cfg Config) withDefaults() Config {
