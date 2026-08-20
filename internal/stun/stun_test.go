@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	stun "github.com/pion/stun"
+	stun "github.com/pion/stun/v3"
 )
 
 func TestNewStun_Defaults(t *testing.T) {

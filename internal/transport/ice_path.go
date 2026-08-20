@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pion/ice/v2"
-	pionstun "github.com/pion/stun"
+	"github.com/pion/ice/v4"
+	pionstun "github.com/pion/stun/v3"
 	"github.com/quic-go/quic-go"
 
 	"github.com/jdefrancesco/wormzy/internal/rendezvous"

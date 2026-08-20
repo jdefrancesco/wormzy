@@ -7,7 +7,7 @@ import (
 	"net"
 	"time"
 
-	stun "github.com/pion/stun"
+	stun "github.com/pion/stun/v3"
 )
 
 // List of public STUN servers

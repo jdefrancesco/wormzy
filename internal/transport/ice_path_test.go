@@ -1,13 +1,123 @@
 package transport
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jdefrancesco/wormzy/internal/rendezvous"
 )
+
+type iceTestMailbox struct {
+	outbound chan<- mailboxMessage
+	inbound  <-chan mailboxMessage
+}
+
+func (m *iceTestMailbox) Claim(context.Context, string) (string, error) { return "", nil }
+
+func (m *iceTestMailbox) StoreSelf(context.Context, rendezvous.SelfInfo) error { return nil }
+
+func (m *iceTestMailbox) WaitPeer(context.Context) (*rendezvous.SelfInfo, error) {
+	return &rendezvous.SelfInfo{}, nil
+}
+
+func (m *iceTestMailbox) Send(ctx context.Context, typ string, body any) error {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	select {
+	case m.outbound <- mailboxMessage{Type: typ, Body: raw}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (m *iceTestMailbox) Receive(ctx context.Context) (mailboxMessage, error) {
+	select {
+	case msg := <-m.inbound:
+		return msg, nil
+	case <-ctx.Done():
+		return mailboxMessage{}, ctx.Err()
+	}
+}
+
+func (m *iceTestMailbox) ReportStats(context.Context, transferStats) error { return nil }
+
+func (m *iceTestMailbox) Close() error { return nil }
+
+func TestRunICEConnect_Loopback(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	toReceiver := make(chan mailboxMessage, 4)
+	toSender := make(chan mailboxMessage, 4)
+	senderMailbox := &iceTestMailbox{outbound: toReceiver, inbound: toSender}
+	receiverMailbox := &iceTestMailbox{outbound: toSender, inbound: toReceiver}
+
+	type connectResult struct {
+		mode  string
+		agent iceResourceCloser
+		conn  net.Conn
+		err   error
+	}
+	results := make(chan connectResult, 2)
+	connect := func(mode string, mbox mailbox) {
+		// Non-empty blank lists suppress production defaults without contacting
+		// public STUN or TURN services during this loopback test.
+		agent, conn, err := runICEConnect(ctx, Config{
+			Mode:             mode,
+			Loopback:         true,
+			STUNServers:      []string{" "},
+			TURNServers:      []string{" "},
+			HandshakeTimeout: 10 * time.Second,
+		}, mbox, nil)
+		results <- connectResult{mode: mode, agent: agent, conn: conn, err: err}
+	}
+
+	go connect("send", senderMailbox)
+	go connect("recv", receiverMailbox)
+
+	var senderConn, receiverConn net.Conn
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("%s ICE connect failed: %v", result.mode, result.err)
+		}
+		t.Cleanup(func() {
+			_ = result.conn.Close()
+			_ = result.agent.Close()
+		})
+		if result.mode == "send" {
+			senderConn = result.conn
+		} else {
+			receiverConn = result.conn
+		}
+	}
+
+	payload := []byte("wormzy-pion-v4")
+	if _, err := senderConn.Write(payload); err != nil {
+		t.Fatalf("write over ICE: %v", err)
+	}
+	if err := receiverConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set ICE read deadline: %v", err)
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(receiverConn, got); err != nil {
+		t.Fatalf("read over ICE: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("ICE payload mismatch: got %q want %q", got, payload)
+	}
+}
 
 func TestPeerSupportsFeatureCaseInsensitive(t *testing.T) {
 	peer := rendezvous.SelfInfo{Features: []string{"ICE-V1", "foo"}}
