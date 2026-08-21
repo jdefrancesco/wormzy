@@ -30,11 +30,21 @@ and quality of code I wanted. Also not a huge fan of any technical debt. I manua
 
 ## Quick Start
 
-Install the `wormzy` CLI:
+Wormzy requires Go 1.27 or newer. Install the latest released `wormzy` CLI:
 
 ```bash
 go install github.com/jdefrancesco/wormzy/cmd/wormzy@latest
 ```
+
+Verify the installed release:
+
+```bash
+wormzy version
+```
+
+Go installs the binary into `GOBIN` when configured, or into
+`$(go env GOPATH)/bin` otherwise. Ensure that directory is on your `PATH` if
+the shell cannot find `wormzy` after installation.
 
 On the sender:
 
