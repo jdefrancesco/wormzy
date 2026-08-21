@@ -21,6 +21,7 @@ type Session struct {
 	Code        string
 	DownloadDir string
 	ShowNetwork bool
+	ShowLogs    bool
 	AutoExit    bool
 }
 
@@ -143,27 +144,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() string {
 	var b strings.Builder
+	panelWidth := uniformPanelWidth(m.width)
 	b.WriteString(renderHeader())
 	b.WriteString("\n")
-	b.WriteString(renderSession(m.session))
+	b.WriteString(renderSession(m.session, panelWidth))
 	b.WriteString("\n")
 	if strings.EqualFold(m.session.Mode, "RECV") && !m.done {
-		b.WriteString(renderReceivePanel(m.session))
+		b.WriteString(renderReceivePanel(m.session, panelWidth))
 		b.WriteString("\n")
 	}
-	b.WriteString(renderSteps(m.steps))
+	b.WriteString(renderSteps(m.steps, panelWidth))
 	b.WriteString("\n")
-	b.WriteString(renderProgress(m.progress))
-	if len(m.logs) > 0 {
+	b.WriteString(renderProgress(m.progress, panelWidth))
+	if m.session.ShowLogs && len(m.logs) > 0 {
 		b.WriteString("\n")
-		b.WriteString(renderLogs(m.logs))
+		b.WriteString(renderLogs(m.logs, panelWidth))
 	}
 	b.WriteString("\n")
 	if m.err != nil {
-		b.WriteString(renderIssuePanel(m.err))
+		b.WriteString(renderIssuePanel(m.err, m.session.ShowLogs, panelWidth))
 		b.WriteString("\n")
 	} else if m.done && m.result != nil {
-		b.WriteString(renderSuccessPanel(m.result))
+		b.WriteString(renderSuccessPanel(m.result, panelWidth))
 		b.WriteString("\n")
 	}
 	b.WriteString(renderFooter(m.done, m.err))
@@ -191,7 +193,7 @@ func progressFromSteps(steps []step) float64 {
 	return score / float64(len(steps))
 }
 
-func renderSession(s Session) string {
+func renderSession(s Session, width int) string {
 	rows := []string{
 		fmt.Sprintf("Mode   %s", highlightText.Render(s.Mode)),
 		fmt.Sprintf("File   %s", highlightText.Render(orDash(s.File))),
@@ -205,10 +207,10 @@ func renderSession(s Session) string {
 	if s.Code != "" {
 		rows = append(rows, fmt.Sprintf("Code   %s", codeStyle.Render(s.Code)))
 	}
-	return boxStyle.Render(strings.Join(rows, "\n"))
+	return renderPanel(boxStyle, width, strings.Join(rows, "\n"))
 }
 
-func renderSteps(steps []step) string {
+func renderSteps(steps []step, width int) string {
 	var lines []string
 	for _, st := range steps {
 		lines = append(lines, fmt.Sprintf("%s %s", stepIcon(st.State), stepTitleStyle.Render(st.Title)))
@@ -216,22 +218,22 @@ func renderSteps(steps []step) string {
 			lines = append(lines, "   "+subtleStyle.Render(st.renderDetail()))
 		}
 	}
-	return boxStyle.Render(strings.Join(lines, "\n"))
+	return renderPanel(boxStyle, width, strings.Join(lines, "\n"))
 }
 
-func renderLogs(logs []string) string {
+func renderLogs(logs []string, width int) string {
 	if len(logs) == 0 {
 		return ""
 	}
-	return boxStyle.Render("Logs\n" + subtleStyle.Render(strings.Join(logs, "\n")))
+	return renderPanel(boxStyle, width, "Logs\n"+subtleStyle.Render(strings.Join(logs, "\n")))
 }
 
-func renderIssuePanel(err error) string {
+func renderIssuePanel(err error, showLogs bool, width int) string {
 	lines := []string{
 		issueTitleStyle.Render("Something went wrong"),
 		highlightText.Render(err.Error()),
 	}
-	if tips := suggestionsForError(err); len(tips) > 0 {
+	if tips := suggestionsForError(err, showLogs); len(tips) > 0 {
 		lines = append(lines, "")
 		lines = append(lines, subtleStyle.Render("Next steps"))
 		for _, tip := range tips {
@@ -240,10 +242,10 @@ func renderIssuePanel(err error) string {
 	}
 	lines = append(lines, "")
 	lines = append(lines, subtleStyle.Render("Press q to exit"))
-	return issueBoxStyle.Render(strings.Join(lines, "\n"))
+	return renderPanel(issueBoxStyle, width, strings.Join(lines, "\n"))
 }
 
-func renderSuccessPanel(res *transport.Result) string {
+func renderSuccessPanel(res *transport.Result, width int) string {
 	if res == nil {
 		return ""
 	}
@@ -263,10 +265,10 @@ func renderSuccessPanel(res *transport.Result) string {
 	lines = append(lines, fmt.Sprintf("Code   %s", codeStyle.Render(orDash(res.Code))))
 	lines = append(lines, "")
 	lines = append(lines, subtleStyle.Render("Press q to exit"))
-	return successBoxStyle.Render(strings.Join(lines, "\n"))
+	return renderPanel(successBoxStyle, width, strings.Join(lines, "\n"))
 }
 
-func renderReceivePanel(s Session) string {
+func renderReceivePanel(s Session, width int) string {
 	if !strings.EqualFold(s.Mode, "RECV") {
 		return ""
 	}
@@ -284,10 +286,10 @@ func renderReceivePanel(s Session) string {
 		" • " + bubblegumAccentStyle.Render("Transfer auto-verifies hashes before finishing."),
 		" • " + bubblegumAccentStyle.Render("Sessions idle out after a few minutes to keep things tidy."),
 	}
-	return bubblegumBoxStyle.Render(strings.Join(lines, "\n"))
+	return renderPanel(bubblegumBoxStyle, width, strings.Join(lines, "\n"))
 }
 
-func suggestionsForError(err error) []string {
+func suggestionsForError(err error, showLogs bool) []string {
 	msg := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(msg, "no route to host"), strings.Contains(msg, "network is unreachable"):
@@ -305,6 +307,11 @@ func suggestionsForError(err error) []string {
 			"Timed out waiting for the relay; confirm the `-relay` address and your upstream connectivity.",
 		}
 	default:
+		if !showLogs {
+			return []string{
+				"Retry with `--logs` to display STUN / relay diagnostics.",
+			}
+		}
 		return []string{
 			"Review the log panel above for STUN / relay output before retrying.",
 		}
@@ -322,20 +329,44 @@ func renderFooter(done bool, err error) string {
 	}
 }
 
-func renderProgress(p float64) string {
+func renderProgress(p float64, width int) string {
 	if p < 0 {
 		p = 0
 	}
 	if p > 1 {
 		p = 1
 	}
-	width := 40
-	filled := int(p * float64(width))
-	if filled > width {
-		filled = width
+	barWidth := 40
+	filled := int(p * float64(barWidth))
+	if filled > barWidth {
+		filled = barWidth
 	}
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
-	return boxStyle.Render(fmt.Sprintf("Progress\n%s %3.0f%%", accentStyle.Render(bar), p*100))
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+	return renderPanel(boxStyle, width, fmt.Sprintf("Progress\n%s %3.0f%%", accentStyle.Render(bar), p*100))
+}
+
+const defaultPanelWidth = 76
+
+func uniformPanelWidth(terminalWidth int) int {
+	if terminalWidth <= 0 {
+		return defaultPanelWidth
+	}
+	available := terminalWidth - 2
+	if available < 1 {
+		return 1
+	}
+	if available < defaultPanelWidth {
+		return available
+	}
+	return defaultPanelWidth
+}
+
+func renderPanel(style lipgloss.Style, width int, content string) string {
+	contentWidth := width - style.GetHorizontalFrameSize()
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+	return style.Width(contentWidth).Render(content)
 }
 
 func stepIcon(state transport.StageState) string {

@@ -48,6 +48,9 @@ func TestParseCLI_SendHelp_PrintsUsageOnce(t *testing.T) {
 	if count := strings.Count(output, "wormzy send"); count != 1 {
 		t.Fatalf("expected help to print once, got %d copies\noutput:\n%s", count, output)
 	}
+	if !strings.Contains(output, "--logs") {
+		t.Fatalf("expected send help to document --logs\noutput:\n%s", output)
+	}
 }
 
 func TestParseCLI_AutoExitSharedFlag(t *testing.T) {
@@ -83,6 +86,32 @@ func TestParseCLI_NoUPnPSharedFlag(t *testing.T) {
 	}
 	if !recvOpt.NoUPnP {
 		t.Fatalf("expected recv --no-upnp to be enabled")
+	}
+}
+
+func TestParseCLI_LogsSharedFlag(t *testing.T) {
+	defaultOpt, err := parseCLI([]string{"send", "payload.bin"})
+	if err != nil {
+		t.Fatalf("parse default send: %v", err)
+	}
+	if defaultOpt.ShowLogs {
+		t.Fatal("expected logs to be disabled by default")
+	}
+
+	sendOpt, err := parseCLI([]string{"send", "payload.bin", "--logs"})
+	if err != nil {
+		t.Fatalf("parse send: %v", err)
+	}
+	if !sendOpt.ShowLogs {
+		t.Fatal("expected send --logs to be enabled")
+	}
+
+	recvOpt, err := parseCLI([]string{"recv", "--logs", "code-123"})
+	if err != nil {
+		t.Fatalf("parse recv: %v", err)
+	}
+	if !recvOpt.ShowLogs {
+		t.Fatal("expected recv --logs to be enabled")
 	}
 }
 

@@ -12,4 +12,7 @@ dist/
 stun.test
 /wormzy
 *.log
-wormzy-debug-*
+testfiles/
+.claude/
+.excalidraw-copilot/
+.zed/

@@ -5,7 +5,7 @@
 ## Session Flow
 
 1. **CLI + TUI**  
-   `cmd/wormzy` parses flags, prompts for a pairing code (receiver), and initializes the UI. The UI watches stage updates so users see STUN, rendezvous, Noise+QUIC, and Transfer progress. When a run completes, it stays on screen with the file path, size, and BLAKE3-256 hash until the user presses `q`. Use `-log-file path` for a detailed trace.
+   `cmd/wormzy` parses flags, prompts for a pairing code (receiver), and initializes the UI. The UI watches stage updates so users see STUN, rendezvous, Noise+QUIC, and Transfer progress. Detailed logs are hidden by default; use `--logs` to show them in the UI or `--log-file path` to save them. When a run completes, it stays on screen with the file path, size, and BLAKE3-256 hash until the user presses `q`.
 
 2. **Rendezvous & PAKE**  
    `internal/transport.Run` binds a UDP socket, probes STUN servers, tries best-effort UPnP UDP port mapping, and collects local + direct candidates. It then opens a mailbox (`internal/transport/mailbox.go` for Redis, or `mailbox_http_client.go` for HTTP) and executes the pairing exchange: claim/generate a code, publish “self” info, and run CPace over the mailbox to derive a shared secret. The redis-backed mailbox lives in managed Redis; the HTTP proxy (`cmd/mailbox`, `internal/transport/mailbox_http_server.go`) exposes `/v1/claim`, `/v1/self`, etc. so clients never talk to Redis directly.
@@ -19,7 +19,7 @@
 ## Configuration Points
 
 - `-relay` (or `WORMZY_RELAY[_URL]`) selects Redis vs. HTTP relay.
-- `-timeout`, `-show-network`, `-log-file`, `-dev-loopback`, and `--no-upnp` customize behavior.
+- `--timeout`, `--show-network`, `--logs`, `--log-file`, `--dev-loopback`, and `--no-upnp` customize behavior.
 - `WORMZY_UPNP=0` disables automatic UPnP mapping in environments where router discovery is not wanted.
 - `cmd/mailbox` runs as `wormzy-mailbox` on your infrastructure; point it at your managed Redis string.
 

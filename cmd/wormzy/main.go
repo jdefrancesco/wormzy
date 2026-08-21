@@ -80,6 +80,7 @@ type options struct {
 	DevLoopback bool
 	NoUPnP      bool
 	ShowNetwork bool
+	ShowLogs    bool
 	AutoExit    bool
 	LogFile     string
 }
@@ -195,6 +196,7 @@ func execute(opt options) error {
 		Relay:       relayAddr,
 		Code:        code,
 		ShowNetwork: opt.ShowNetwork,
+		ShowLogs:    opt.ShowLogs,
 		AutoExit:    opt.AutoExit,
 		DownloadDir: downloadDir,
 	}
@@ -344,6 +346,7 @@ func registerSharedFlags(fs *flag.FlagSet, opt *options) {
 	fs.BoolVar(&opt.DevLoopback, "dev-loopback", false, "use local addresses for testing")
 	fs.BoolVar(&opt.NoUPnP, "no-upnp", false, "disable automatic UPnP UDP port mapping")
 	fs.BoolVar(&opt.ShowNetwork, "show-network", false, "display relay/STUN diagnostics in the UI")
+	fs.BoolVar(&opt.ShowLogs, "logs", false, "display detailed session logs in the UI")
 	fs.BoolVar(&opt.AutoExit, "auto-exit", false, "exit automatically after a successful transfer")
 	fs.StringVar(&opt.LogFile, "log-file", "", "append detailed session logs to the given file")
 }
@@ -386,6 +389,7 @@ func printSharedFlags() {
 	fmt.Println(formatFlagLine("--dev-loopback", "keep traffic on localhost for demos"))
 	fmt.Println(formatFlagLine("--no-upnp", "disable automatic UPnP UDP port mapping"))
 	fmt.Println(formatFlagLine("--show-network", "display relay/STUN diagnostics in the UI"))
+	fmt.Println(formatFlagLine("--logs", "display detailed session logs in the UI"))
 	fmt.Println(formatFlagLine("--auto-exit", "return to the shell after a successful transfer"))
 	fmt.Println(formatFlagLine("--log-file", "append detailed session logs to the given file"))
 }
