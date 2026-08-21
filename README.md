@@ -101,9 +101,9 @@ Wormzy transport paths are:
 
 Please email: jdefr89@gmail.com.
 
-## Data/Model Use Notice
+## License
 
-The code, text, and assets in this repository may not be used to train, fine-tune, or improve large language models or other generative AI systems without explicit written permission from the project owner.
+Wormzy is free software licensed under the [GNU Affero General Public License version 3](LICENSE) (`AGPL-3.0-only`). Modified versions made available for users to interact with over a network must offer those users the corresponding source code, as required by the license.
 
 ## AI/LLM Usage
 
