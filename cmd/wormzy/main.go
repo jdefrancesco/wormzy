@@ -27,11 +27,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-isatty"
 
+	"github.com/jdefrancesco/wormzy/internal/buildinfo"
 	"github.com/jdefrancesco/wormzy/internal/transport"
 	"github.com/jdefrancesco/wormzy/internal/ui"
 )
-
-const version = "0.1.2-dev"
 
 // boldCodeStyle returns the style used for pairing codes in headless output.
 func boldCodeStyle() lipgloss.Style {
@@ -65,7 +64,7 @@ func ShowHeader() string {
 
 	title := titleStyle.Render(logo)
 	subtitle := subtitleStyle.Render("secure p2p file tx/rx • noise • quic")
-	ver := subtitleStyle.Render(version)
+	ver := subtitleStyle.Render(buildinfo.Current().VersionString())
 	return boxStyle.Render(title + "\n" + subtitle + "  -  " + ver)
 }
 
@@ -97,6 +96,11 @@ var (
 
 // main parses CLI arguments and runs the requested Wormzy command.
 func main() {
+	if isVersionCommand(os.Args[1:]) {
+		fmt.Println(buildinfo.Current().Format("wormzy"))
+		return
+	}
+
 	fmt.Println(ShowHeader())
 	fmt.Println()
 
@@ -117,6 +121,11 @@ func main() {
 // execute validates options and runs the selected command.
 func execute(opt options) error {
 	if runningUnderGoTest() {
+		return nil
+	}
+
+	if opt.Mode == "version" {
+		fmt.Println(buildinfo.Current().Format("wormzy"))
 		return nil
 	}
 
@@ -234,6 +243,9 @@ func parseCLI(args []string) (options, error) {
 		printGeneralUsage()
 		return options{}, errShowHelp
 	}
+	if isVersionCommand(args) {
+		return options{Mode: "version"}, nil
+	}
 	switch args[0] {
 	case "send":
 		return parseSend(args[1:])
@@ -247,6 +259,19 @@ func parseCLI(args []string) (options, error) {
 	default:
 		printGeneralUsage()
 		return options{}, fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+// isVersionCommand reports whether args request top-level version information.
+func isVersionCommand(args []string) bool {
+	if len(args) != 1 {
+		return false
+	}
+	switch args[0] {
+	case "version", "-version", "--version":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -366,6 +391,7 @@ func printGeneralUsage() {
 	fmt.Println(usageCommandStyle.Render("  wormzy send <file> [flags]"))
 	fmt.Println(usageCommandStyle.Render("  wormzy recv [code] [flags]"))
 	fmt.Println(usageCommandStyle.Render("  wormzy info [flags]"))
+	fmt.Println(usageCommandStyle.Render("  wormzy version"))
 	fmt.Println()
 	fmt.Println(usageDescStyle.Render("Use `wormzy <command> -h` for command-specific flags."))
 }

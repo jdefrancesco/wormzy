@@ -53,6 +53,20 @@ func TestParseCLI_SendHelp_PrintsUsageOnce(t *testing.T) {
 	}
 }
 
+func TestParseCLI_VersionCommands(t *testing.T) {
+	for _, arg := range []string{"version", "-version", "--version"} {
+		t.Run(arg, func(t *testing.T) {
+			opt, err := parseCLI([]string{arg})
+			if err != nil {
+				t.Fatalf("parse %s: %v", arg, err)
+			}
+			if opt.Mode != "version" {
+				t.Fatalf("mode = %q; want version", opt.Mode)
+			}
+		})
+	}
+}
+
 func TestParseCLI_AutoExitSharedFlag(t *testing.T) {
 	sendOpt, err := parseCLI([]string{"send", "payload.bin", "--auto-exit"})
 	if err != nil {

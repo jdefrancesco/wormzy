@@ -5,11 +5,13 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/jdefrancesco/wormzy/internal/buildinfo"
 	"github.com/jdefrancesco/wormzy/internal/rendezvous"
 )
 
@@ -17,7 +19,12 @@ func main() {
 	addr := flag.String("addr", ":9999", "listen address")
 	tlsCert := flag.String("tlscert", "", "TLS certificate file (PEM)")
 	tlsKey := flag.String("tlskey", "", "TLS private key file (PEM)")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(buildinfo.Current().Format("rendezvous"))
+		return
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	srv := &rendezvous.Server{

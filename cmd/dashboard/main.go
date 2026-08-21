@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/jdefrancesco/wormzy/internal/buildinfo"
 	"github.com/jdefrancesco/wormzy/internal/transport"
 )
 
@@ -21,8 +22,13 @@ func main() {
 		redisURL = flag.String("redis", defaultRedisURL(), "redis URL (rediss://user:pass@host:port)")
 		prefix   = flag.String("prefix", "wormzy", "redis key prefix")
 		refresh  = flag.Duration("refresh", 5*time.Second, "refresh interval")
+		version  = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
+	if *version {
+		fmt.Println(buildinfo.Current().Format("dashboard"))
+		return
+	}
 
 	if *redisURL == "" {
 		fmt.Fprintln(os.Stderr, "error: redis URL required; pass -redis or set WORMZY_METRICS_REDIS")

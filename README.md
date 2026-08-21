@@ -73,6 +73,20 @@ Large transfers run with per-stream idle timeouts; stalled sessions abort instea
 To measure whether UPnP improves direct connections across two real NATs, use
 the balanced two-host workflow in [`docs/UPNP-AB-TEST.md`](docs/UPNP-AB-TEST.md).
 
+## Versioning
+
+Git tags are Wormzy's version source of truth. `make build` records the nearest
+tag, commit SHA, and UTC build time in every binary. A build made exactly at a
+tag reports that tag (for example, `v0.2.0`); later development builds include
+the commit distance and abbreviated SHA from `git describe`.
+
+Run `wormzy version` or `wormzy --version` to inspect the client. Infrastructure
+binaries expose the same information through `-version`, such as
+`./bin/mailbox -version` and `./bin/relay -version`.
+
+Release automation can override the detected values with `VERSION`, `COMMIT`,
+and `BUILD_DATE` when invoking `make build`.
+
 ## Deploying updated binaries
 
 On a server with the `systemd` units installed, run `make deploy`. It builds the binaries, installs them to `/usr/local/bin`, reloads systemd, and restarts `wormzy-mailbox`, `wormzy-rendezvous`, and `wormzy-relay` (ignored if those services are absent).

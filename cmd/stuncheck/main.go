@@ -3,14 +3,23 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/jdefrancesco/wormzy/internal/buildinfo"
 	"github.com/jdefrancesco/wormzy/internal/stun"
 )
 
 func main() {
+	showVersion := flag.Bool("version", false, "print version and exit")
+	flag.Parse()
+	if *showVersion {
+		fmt.Println(buildinfo.Current().Format("stuncheck"))
+		return
+	}
+
 	// simple logger to stdout
 	slog.SetDefault(slog.New(slog.NewTextHandler(logWriter{}, nil)))
 

@@ -3,6 +3,11 @@ GOBUILD=$(GOCMD) build
 GOCLEAN=$(GOCMD) clean
 GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+BUILDINFO_PACKAGE=github.com/jdefrancesco/wormzy/internal/buildinfo
+BUILD_LDFLAGS=$(strip $(LDFLAGS) -X $(BUILDINFO_PACKAGE).version=$(VERSION) -X $(BUILDINFO_PACKAGE).commit=$(COMMIT) -X $(BUILDINFO_PACKAGE).buildDate=$(BUILD_DATE))
 TEST_TIMEOUT ?= 60s
 BIN_DIR=bin
 SYSTEMD_DIR=/etc/systemd/system
@@ -26,19 +31,19 @@ deploy: install install-units
 
 debug:
 	@mkdir -p $(BIN_DIR)
-	$(GOBUILD) -o $(DEFAULT_BINARY) -gcflags "all=-N -l" -v ./cmd/wormzy
+	$(GOBUILD) -ldflags "$(BUILD_LDFLAGS)" -o $(DEFAULT_BINARY) -gcflags "all=-N -l" -v ./cmd/wormzy
 
 build:
 # 	gosec -exclude=G104,G307 $(GOSEC_DIRS)
 	@mkdir -p $(BIN_DIR)
 	@for bin in $(BINARIES); do \
-		$(GOBUILD) -o $(BIN_DIR)/$$bin -v ./cmd/$$bin ; \
+		$(GOBUILD) -ldflags "$(BUILD_LDFLAGS)" -o $(BIN_DIR)/$$bin -v ./cmd/$$bin ; \
 	done
 
 .PHONY: wormzy
 wormzy:
 	@mkdir -p $(BIN_DIR)
-	$(GOBUILD) -o $(BIN_DIR)/wormzy -v ./cmd/wormzy
+	$(GOBUILD) -ldflags "$(BUILD_LDFLAGS)" -o $(BIN_DIR)/wormzy -v ./cmd/wormzy
 
 test:
 	$(GOTEST) -timeout $(TEST_TIMEOUT) -v $(PACKAGES)

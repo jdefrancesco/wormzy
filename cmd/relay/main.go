@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/jdefrancesco/wormzy/internal/buildinfo"
 	"github.com/jdefrancesco/wormzy/internal/transport"
 )
 
@@ -16,7 +18,12 @@ func main() {
 	listen := flag.String("listen", ":3478", "UDP listen address for the QUIC relay")
 	redisURL := flag.String("redis", defaultTelemetryRedisURL(), "redis URL for operator telemetry and controls")
 	prefix := flag.String("prefix", "wormzy", "redis key prefix")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(buildinfo.Current().Format("relay"))
+		return
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
