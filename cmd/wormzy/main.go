@@ -33,6 +33,7 @@ import (
 
 const version = "0.1.2-dev"
 
+// boldCodeStyle returns the style used for pairing codes in headless output.
 func boldCodeStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFD75F"))
 }
@@ -50,6 +51,7 @@ var (
 			Padding(1, 3)
 )
 
+// ShowHeader renders the Wormzy CLI banner.
 func ShowHeader() string {
 
 	logo := `
@@ -93,6 +95,7 @@ var (
 	usageDescStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#CACACA"))
 )
 
+// main parses CLI arguments and runs the requested Wormzy command.
 func main() {
 	fmt.Println(ShowHeader())
 	fmt.Println()
@@ -111,6 +114,7 @@ func main() {
 	}
 }
 
+// execute validates options and runs the selected command.
 func execute(opt options) error {
 	if runningUnderGoTest() {
 		return nil
@@ -224,6 +228,7 @@ func execute(opt options) error {
 	return nil
 }
 
+// parseCLI dispatches command-line arguments to the selected subcommand parser.
 func parseCLI(args []string) (options, error) {
 	if len(args) == 0 {
 		printGeneralUsage()
@@ -245,6 +250,7 @@ func parseCLI(args []string) (options, error) {
 	}
 }
 
+// parseSend parses options for the send command.
 func parseSend(args []string) (options, error) {
 	opt := options{Mode: "send"}
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
@@ -291,6 +297,7 @@ func parseSend(args []string) (options, error) {
 	return opt, nil
 }
 
+// parseRecv parses options for the receive command.
 func parseRecv(args []string) (options, error) {
 	opt := options{Mode: "recv", DownloadDir: "."}
 	fs := flag.NewFlagSet("recv", flag.ContinueOnError)
@@ -317,6 +324,7 @@ func parseRecv(args []string) (options, error) {
 	return opt, nil
 }
 
+// parseInfo parses options for the info command.
 func parseInfo(args []string) (options, error) {
 	opt := options{Mode: "info"}
 	fs := flag.NewFlagSet("info", flag.ContinueOnError)
@@ -337,6 +345,7 @@ func parseInfo(args []string) (options, error) {
 	return opt, nil
 }
 
+// registerSharedFlags registers options common to send and receive commands.
 func registerSharedFlags(fs *flag.FlagSet, opt *options) {
 	fs.StringVar(&opt.Relay, "relay", "", "mailbox/rendezvous endpoint (defaults to WORMZY_RELAY_URL; legacy redis:// supported)")
 	fs.StringVar(&opt.TURN, "turn", "", "comma-separated authenticated TURN URLs (or WORMZY_TURN_URLS)")
@@ -351,6 +360,7 @@ func registerSharedFlags(fs *flag.FlagSet, opt *options) {
 	fs.StringVar(&opt.LogFile, "log-file", "", "append detailed session logs to the given file")
 }
 
+// printGeneralUsage prints the top-level command usage.
 func printGeneralUsage() {
 	fmt.Println(usageHeadingStyle.Render("Usage"))
 	fmt.Println(usageCommandStyle.Render("  wormzy send <file> [flags]"))
@@ -360,6 +370,7 @@ func printGeneralUsage() {
 	fmt.Println(usageDescStyle.Render("Use `wormzy <command> -h` for command-specific flags."))
 }
 
+// printSendUsage prints usage for the send command.
 func printSendUsage() {
 	fmt.Println(usageHeadingStyle.Render("wormzy send"))
 	fmt.Println(usageDescStyle.Render("Send a file to your peer. Provide the file as a positional argument or with --file."))
@@ -370,6 +381,7 @@ func printSendUsage() {
 	printSharedFlags()
 }
 
+// printRecvUsage prints usage for the receive command.
 func printRecvUsage() {
 	fmt.Println(usageHeadingStyle.Render("wormzy recv"))
 	fmt.Println(usageDescStyle.Render("Receive a file from your peer. Leave the code blank to be prompted interactively."))
@@ -380,6 +392,7 @@ func printRecvUsage() {
 	printSharedFlags()
 }
 
+// printSharedFlags prints options common to send and receive commands.
 func printSharedFlags() {
 	fmt.Println(formatFlagLine("--relay", "mailbox/rendezvous endpoint (defaults to env WORMZY_RELAY_URL)"))
 	fmt.Println(formatFlagLine("--turn", "comma-separated authenticated TURN URLs (or env WORMZY_TURN_URLS)"))
@@ -394,6 +407,7 @@ func printSharedFlags() {
 	fmt.Println(formatFlagLine("--log-file", "append detailed session logs to the given file"))
 }
 
+// printInfoUsage prints usage for the info command.
 func printInfoUsage() {
 	fmt.Println(usageHeadingStyle.Render("wormzy info"))
 	fmt.Println(usageDescStyle.Render("Check which mailbox/rendezvous endpoint will be used and whether it is reachable."))
@@ -403,10 +417,12 @@ func printInfoUsage() {
 	fmt.Println(formatFlagLine("--turn", "comma-separated authenticated TURN URLs (or env WORMZY_TURN_URLS)"))
 }
 
+// formatFlagLine formats a name and description for CLI output.
 func formatFlagLine(name, desc string) string {
 	return fmt.Sprintf("  %s %s", usageFlagStyle.Render(name), usageDescStyle.Render(desc))
 }
 
+// runInfo reports the configured relay and TURN endpoints and probes relay reachability.
 func runInfo(opt options) error {
 	relay := resolveRelay(opt.Relay)
 	turns := effectiveTURNServers(opt.TURN, relay)
@@ -428,6 +444,7 @@ func runInfo(opt options) error {
 	return nil
 }
 
+// probeRelay checks whether a relay endpoint accepts connections.
 func probeRelay(relay string) error {
 	if strings.HasPrefix(relay, "http://") || strings.HasPrefix(relay, "https://") {
 		return probeHTTPRelay(relay)
@@ -444,6 +461,7 @@ func probeRelay(relay string) error {
 	return nil
 }
 
+// probeHTTPRelay checks an HTTP relay's health endpoint.
 func probeHTTPRelay(relay string) error {
 	u, err := url.Parse(relay)
 	if err != nil {
@@ -462,6 +480,7 @@ func probeHTTPRelay(relay string) error {
 	return nil
 }
 
+// relayDialTarget converts a relay endpoint into a TCP dial address.
 func relayDialTarget(relay string) (string, error) {
 	if strings.Contains(relay, "://") {
 		u, err := url.Parse(relay)
@@ -579,6 +598,7 @@ func resolveRelay(flagValue string) string {
 	return transport.DefaultRelay()
 }
 
+// effectiveTURNServers returns configured TURN servers or relay-derived defaults.
 func effectiveTURNServers(flagValue, relayAddr string) []string {
 	if turns := resolveTURNServers(flagValue); len(turns) > 0 {
 		return turns
@@ -586,6 +606,7 @@ func effectiveTURNServers(flagValue, relayAddr string) []string {
 	return transport.DefaultTURNServers(relayAddr)
 }
 
+// resolveTURNServers parses and deduplicates TURN servers from flags or the environment.
 func resolveTURNServers(flagValue string) []string {
 	raw := strings.TrimSpace(flagValue)
 	if raw == "" {
@@ -623,6 +644,7 @@ func resolveTURNServers(flagValue string) []string {
 	return out
 }
 
+// upnpDisabledByEnv reports whether WORMZY_UPNP explicitly disables UPnP.
 func upnpDisabledByEnv() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("WORMZY_UPNP"))) {
 	case "0", "false", "no", "off", "disabled":
@@ -632,6 +654,7 @@ func upnpDisabledByEnv() bool {
 	}
 }
 
+// formatTURNServerSummary formats TURN endpoints without exposing credentials.
 func formatTURNServerSummary(servers []string) string {
 	if len(servers) == 0 {
 		return "(none)"
@@ -643,6 +666,7 @@ func formatTURNServerSummary(servers []string) string {
 	return strings.Join(redacted, ", ")
 }
 
+// redactCredentialHost masks credentials embedded in an endpoint.
 func redactCredentialHost(raw string) string {
 	raw = strings.TrimSpace(raw)
 	at := strings.LastIndex(raw, "@")
@@ -678,6 +702,7 @@ func relayFromConfig() (string, bool) {
 	return "", false
 }
 
+// ensureDownloadDir validates or creates a download directory.
 func ensureDownloadDir(path string) error {
 	info, err := os.Stat(path)
 	switch {
@@ -711,6 +736,7 @@ type reporterMux struct {
 	reporters []transport.Reporter
 }
 
+// Logf forwards a formatted log message to each reporter.
 func (m reporterMux) Logf(format string, args ...any) {
 	for _, r := range m.reporters {
 		if r != nil {
@@ -719,6 +745,7 @@ func (m reporterMux) Logf(format string, args ...any) {
 	}
 }
 
+// Stage forwards a stage update to each reporter.
 func (m reporterMux) Stage(stage transport.Stage, state transport.StageState, detail string) {
 	for _, r := range m.reporters {
 		if r != nil {
@@ -740,6 +767,7 @@ type fileReporter struct {
 	out io.Writer
 }
 
+// Logf appends a timestamped log message to the output.
 func (f *fileReporter) Logf(format string, args ...any) {
 	if f == nil || f.out == nil {
 		return
@@ -749,6 +777,7 @@ func (f *fileReporter) Logf(format string, args ...any) {
 	fmt.Fprintf(f.out, "[%s] LOG %s\n", time.Now().Format(time.RFC3339Nano), fmt.Sprintf(format, args...))
 }
 
+// Stage appends a timestamped stage update to the output.
 func (f *fileReporter) Stage(stage transport.Stage, state transport.StageState, detail string) {
 	if f == nil || f.out == nil {
 		return

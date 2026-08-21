@@ -206,6 +206,8 @@ func renderSession(s Session, width int) string {
 	}
 	if s.Code != "" {
 		rows = append(rows, fmt.Sprintf("Code   %s", codeStyle.Render(s.Code)))
+	} else if strings.EqualFold(s.Mode, "SEND") {
+		rows = append(rows, fmt.Sprintf("Code   %s", subtleStyle.Render("waiting for pairing code…")))
 	}
 	return renderPanel(boxStyle, width, strings.Join(rows, "\n"))
 }

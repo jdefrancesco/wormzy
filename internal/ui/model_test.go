@@ -34,6 +34,27 @@ func TestModel_LogsRequireOptIn(t *testing.T) {
 	}
 }
 
+func TestModel_SendShowsCodeState(t *testing.T) {
+	model := NewModel(Session{Mode: "SEND", File: "payload.bin"})
+	initialView := ansi.Strip(model.View())
+	if !strings.Contains(initialView, "Code   waiting for pairing code") {
+		t.Fatalf("expected sender to show the pending code state\nview:\n%s", initialView)
+	}
+
+	model = updateModel(t, model, stageMsg{
+		stage:  transport.StageRendezvous,
+		state:  transport.StageStateRunning,
+		detail: "code fresh-code",
+	})
+	updatedView := ansi.Strip(model.View())
+	if !strings.Contains(updatedView, "Code   fresh-code") {
+		t.Fatalf("expected sender to show the assigned code\nview:\n%s", updatedView)
+	}
+	if strings.Contains(updatedView, "waiting for pairing code") {
+		t.Fatalf("expected assigned code to replace pending state\nview:\n%s", updatedView)
+	}
+}
+
 func TestModel_AllPanelBordersHaveEqualWidth(t *testing.T) {
 	tests := []struct {
 		name  string
