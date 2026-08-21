@@ -2,7 +2,11 @@
 
 ## Project Overview
 
+**NOTICE** This project is *Agentic Augmented*. Some of the core code I wrote personally to ensure security
+and quality of code I wanted. Also not a fan of technical debt. I review all code before I commit.
+
 `Wormzy` is a Go-native take on `magic-wormhole`: exchange a code for hassle free p2p file transfers that are secure and built on modern primitives.  punching. Read docs/ files and understand the current landscape and implementation.
+
 
 ## Project Structure & Module Organization
 

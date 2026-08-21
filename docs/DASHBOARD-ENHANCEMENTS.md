@@ -2,9 +2,8 @@
 
 ## Overview
 
-The dashboard has been significantly enhanced to provide more verbose and actionable information for P2P optimization.
-
-## New Features
+This document is only relevant to server side logistics that I handle... But my dashboard is something
+like this...
 
 ### 1. **Visual P2P Success Rate Indicator**
 
@@ -121,9 +120,9 @@ go run ./cmd/dashboard -redis rediss://your-redis-url -prefix wormzy-prod
 
 ```
 ╭────────────────────────────────────────╮
-│ 📊 Overall Statistics                  │
+│  Overall Statistics                    │
 │                                        │
-│ 🟢 EXCELLENT  85.7% P2P  (P2P working  │
+│  EXCELLENT  85.7% P2P  (P2P working    | 
 │ great!)                                │
 │                                        │
 │ Total sessions    42                   │
@@ -150,7 +149,7 @@ go run ./cmd/dashboard -redis rediss://your-redis-url -prefix wormzy-prod
 ╰────────────────────────────────────────╯
 
 ╭────────────────────────────────────────╮
-│ 🔍 Debug Information                   │
+│  Debug Information                     │
 │                                        │
 │ Direct outcomes:                       │
 │   won            30 (75.0%)            │

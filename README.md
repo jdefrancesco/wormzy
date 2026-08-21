@@ -1,31 +1,32 @@
 # Wormzy
 
-`wormzy` aims to be a simple, fast, and secure method to share large files with another party peer-2-peer. It's similar to 
-[Magic Wormhole](https://github.com/magic-wormhole/magic-wormhole) but it's built on more modern primitives and aims to be far
-more portable. 
+`wormzy` aims to be a simple, fast, and secure method to share files of any size with another party P2P. It's similar to [Magic Wormhole](https://github.com/magic-wormhole/magic-wormhole). It's built on more modern primitives (QUIC/Noise/ChaCha) and aims to be far more secure, portable and user friendly.
 
+**DISCLOSURE**: `wormzy` is agentic augmented. Primary core code I wrote manually to ensure security
+and quality of code I wanted. Also not a huge fan of any technical debt. I manually review and test changes. See [AI/LLM Usage](#aillm-usage) 
 
-It's primary features include:
+## Primary Features
 
 * Send file of any size peer-to-peer with zero hassle. That means no need to change NAT rules or port forwarding.
 * Communication is secure/encrypted
 * Utilizes QUIC for fast transfers. Blake3 is used for validating the entire, uncorrupted file was received!
+* See [HOWITWORKS.md](./docs/HOWITWORKS.md) for more detailed descriptions.
+* Both the server and client code is Open Source (AGPL-3.0) so users can audit code as they please.
 
-## Why Wormzy
+## Why `Wormzy` ...?
 
 - No setup for users: baked-in mailbox endpoint `https://relay.wormzy.io` works out of the box; overrides stay opt-in.
 - P2P-first: prioritizes direct UDP/QUIC; relays only as a fallback.
-- Human-friendly pairing codes and auto file collision handling (`example (wormzy-1).txt`).
+- Human-friendly pairing codes and auto file collision handling. 
 - Integrity and privacy: Noise + QUIC with SAS, disk-space preflight, and hash verification.
-- Cross-platform CLI with a beautiful TUI! Plus headless mode for scripts/CI *(in progress)*.
+- Cross-platform CLI with a sleek TUI. Eventually headless mode will be added for scripts/CI *(in progress)*.
 
-## Wormzy vs. Magic Wormhole
+## `Wormzy` vs. `Magic Wormhole`
 
-- Transport: QUIC + Noise with NAT punching; Magic Wormhole uses TCP + PAKE with relay streams.
+- Built on modern primitives: QUIC, CPace PAKE, Noise NN, XChaCha20-Poly1305, BLAKE3 
+- Portable binary. Supports macOS/Linux/Windows. 
 - Defaults: Baked-in HTTPS mailbox endpoint, STUN list, best-effort UPnP port mapping, and optional QUIC relay fallback; Magic Wormhole typically needs a relay URL or uses the Python community relay.
 - UX: Bubble Tea TUI with headless fallback; Magic Wormhole is plain CLI.
-- File safety: Collision-safe saves (`name (wormzy-1).txt`) and disk-space preflight; Magic Wormhole overwrites unless redirected.
-- Operations: Redis-backed operator console showing mailbox health, live QUIC relay activity, recent P2P/relay outcomes, and guarded session controls.
 
 ## Quick Start
 
