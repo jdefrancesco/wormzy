@@ -2,6 +2,7 @@ package stun
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -103,6 +104,17 @@ func (s *Stun) discoverIPv4() error {
 // probeServer performs a STUN Binding Request to the given server using a
 // temporary UDP socket and returns the discovered public UDP address.
 func probeServer(ctx context.Context, server string, rto time.Duration, maxRetrans uint) (*net.UDPAddr, error) {
+	const maxSupportedRetransmissions = 32
+	if maxRetrans > maxSupportedRetransmissions {
+		return nil, fmt.Errorf("STUN retransmissions exceed limit of %d", maxSupportedRetransmissions)
+	}
+	if rto <= 0 {
+		return nil, errors.New("STUN retransmission timeout must be positive")
+	}
+	attempts := time.Duration(maxRetrans + 1) // #nosec G115 -- maxRetrans is capped above.
+	if rto > time.Duration(1<<63-1)/attempts {
+		return nil, errors.New("STUN retry window exceeds duration limit")
+	}
 	srv, err := net.ResolveUDPAddr("udp4", server)
 	if err != nil {
 		return nil, err
@@ -121,7 +133,7 @@ func probeServer(ctx context.Context, server string, rto time.Duration, maxRetra
 		return nil, werr
 	}
 
-	dead := time.Now().Add(time.Duration(maxRetrans+1) * rto)
+	dead := time.Now().Add(attempts * rto)
 	buf := make([]byte, 1500)
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(rto))

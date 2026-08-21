@@ -28,10 +28,13 @@ Follow the testing scenarios in `P2P-BASELINE-TEMPLATE.md`:
 ```bash
 # Same LAN test
 # Terminal 1
-go run ./cmd/wormzy -mode recv -code test-lan 2>&1 | tee recv-lan.log
+PAIRING_CODE="$(go run ./cmd/wormzy code)"
+printf 'Pairing code: %s\n' "$PAIRING_CODE"
+go run ./cmd/wormzy recv --code "$PAIRING_CODE" 2>&1 | tee recv-lan.log
 
-# Terminal 2
-go run ./cmd/wormzy -mode send -file testfile.bin -code test-lan 2>&1 | tee send-lan.log
+# Terminal 2: copy the freshly generated code printed by Terminal 1.
+PAIRING_CODE='<code-from-terminal-1>'
+go run ./cmd/wormzy send testfile.bin --code "$PAIRING_CODE" 2>&1 | tee send-lan.log
 ```
 
 For durability testing, run a repeated matrix across payload sizes:
@@ -85,6 +88,10 @@ cp docs/P2P-BASELINE-TEMPLATE.md docs/P2P-BASELINE-$(date +%Y%m%d).md
 - **../scripts/analyze-p2p-logs.sh** - Helper script to parse transfer logs
 - **../scripts/nat-durability.sh** - Matrix runner for repeated P2P durability trials
 
+## Current Path Order
+
+Wormzy claims and displays the pairing code before network discovery. It publishes initial local and reflexive candidates, derives the CPace key, and then tries Pion ICE on Pion-owned sockets. Immediately before Pion begins connectivity checks, Wormzy arms a 1.5-second timer; if ICE remains unresolved, a cancellable UPnP attempt maps the separate legacy UDP socket. An ICE win removes that mapping, while an ICE failure triggers a PAKE-authenticated candidate refresh before the legacy direct race. Explicitly configured TURN candidates participate in the initial ICE attempt and can win before UPnP; the custom Wormzy relay is last. After transfer, peers authenticate a receipt bound to the pairing code, file size, and BLAKE3 digest before reporting success. A peer without this completion protocol is rejected with upgrade guidance rather than silently downgraded.
+
 ## Workflow
 
 ```mermaid
@@ -113,6 +120,7 @@ Focus on these dashboard metrics:
 |--------|--------|------------------------|
 | P2P % | 70%+ | Check DirectOutcome distribution |
 | Same-LAN P2P | 100% | BUG: Check candidate selection |
+| UPnP candidate use | Only after ICE failure | Check progressive UPnP and candidate-refresh logs |
 | quic-timeout rate | <20% | Consider longer relay fallback delay |
 | no-response rate | <10% | Check STUN servers |
 
@@ -143,19 +151,20 @@ Focus on these dashboard metrics:
 Start here to understand the P2P flow:
 
 1. `internal/transport/transport.go:Run()` - Main transfer orchestration
-   - Lines 200-240: ICE/STUN discovery
-   - Lines 345-359: Punch packet loop
-   - Lines 424-438: Dial attempt schedule
-   - Lines 469-707: Race logic (direct vs relay)
+   - Claims the code, gathers the initial legacy candidates, tries ICE, then runs the legacy direct/relay race
 
 2. `internal/transport/dilation.go` - Candidate selection
-   - Lines 17-46: `buildCandidates()` - Advertise our addresses
-   - Lines 48-122: `selectPeerCandidates()` - Choose peer's best addresses
-   - Lines 124-137: `candidateRaceWeight()` - Priority scoring
+   - `buildCandidates()` - Advertise our addresses
+   - `selectPeerCandidates()` - Choose the peer's best addresses
+   - `candidateRaceWeight()` - Priority scoring
 
 3. `internal/stun/stun.go` - STUN discovery
-   - Lines 53-101: `discoverIPv4()` - Parallel probe all servers
-   - Lines 105-164: `probeServer()` - Single STUN query
+   - `DiscoverOnConn()` - Sequentially probes a shuffled server list on the shared legacy socket
+   - `probeWithConn()` - Single STUN query on that socket
+
+4. `internal/transport/ice_path.go` and `progressive_upnp.go`
+   - Pion-owned ICE sockets and candidate exchange
+   - Delayed UPnP, PAKE-authenticated readiness, and refreshed legacy candidates
 
 ## Testing Checklist
 

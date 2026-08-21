@@ -76,10 +76,13 @@ Usage:
 2. **Run test transfers**
    ```bash
    # Terminal 1
-   go run ./cmd/wormzy -mode recv -code test1 2>&1 | tee recv.log
+   PAIRING_CODE="$(go run ./cmd/wormzy code)"
+   printf 'Pairing code: %s\n' "$PAIRING_CODE"
+   go run ./cmd/wormzy recv --code "$PAIRING_CODE" 2>&1 | tee recv.log
    
-   # Terminal 2
-   go run ./cmd/wormzy -mode send -file test.bin -code test1 2>&1 | tee send.log
+   # Terminal 2: copy the freshly generated code printed by Terminal 1.
+   PAIRING_CODE='<code-from-terminal-1>'
+   go run ./cmd/wormzy send test.bin --code "$PAIRING_CODE" 2>&1 | tee send.log
    ```
 
 3. **Check the dashboard**
@@ -154,7 +157,9 @@ The existing code is already sophisticated:
 -  3 concurrent dial attempts per candidate
 -  Staggered timing (0ms, 700ms, 1500ms)
 -  LAN detection (same public IP → prefer local)
--  Parallel STUN probes (first success wins)
+-  Sequential probes of a shuffled STUN list on the shared legacy socket
+-  Pion ICE first, using Pion-owned sockets and candidate gathering
+-  Delayed, cancellable UPnP fallback for the legacy socket
 -  4s graceful relay fallback
 -  150ms NAT punch packets
 -  Role-based path preference (prevents split-brain)
@@ -174,12 +179,14 @@ The existing code is already sophisticated:
 ### Candidate Types
 
 - `reflexive` - Public IP from STUN (typical NAT-to-NAT)
+- `upnp` - Validated router mapping for the legacy path after ICE failure
 - `local` - LAN address (same network)
 - `relay` - Fallback relay server
 - `loopback` - Local testing only
 
 ### Timing Constants (transport.go)
 
+- Progressive UPnP delay: `1.5s` - Timer starts immediately before Pion connectivity checks; maps only while ICE remains unresolved
 - `relayFallbackDelay = 4s` - When to try relay
 - `relayRetryDelay = 3s` - Delay between relay retries
 - `relayAttemptTimeout = 6s` - Individual relay timeout
@@ -210,5 +217,3 @@ The existing code is already sophisticated:
 
 
 **The framework emphasizes data collection before optimization** - measure first, tune second!
-
-

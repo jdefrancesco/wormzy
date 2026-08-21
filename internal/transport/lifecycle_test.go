@@ -3,20 +3,27 @@ package transport
 import (
 	"context"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jdefrancesco/wormzy/internal/rendezvous"
-	"github.com/quic-go/quic-go"
 )
 
 type lifecycleMailbox struct {
 	report func(context.Context, transferStats) error
+	store  func(context.Context, rendezvous.SelfInfo) error
 }
 
 func (m *lifecycleMailbox) Claim(context.Context, string) (string, error) { return "", nil }
 
-func (m *lifecycleMailbox) StoreSelf(context.Context, rendezvous.SelfInfo) error { return nil }
+// StoreSelf records a lease refresh when the test installs a callback.
+func (m *lifecycleMailbox) StoreSelf(ctx context.Context, info rendezvous.SelfInfo) error {
+	if m.store == nil {
+		return nil
+	}
+	return m.store(ctx, info)
+}
 
 func (m *lifecycleMailbox) WaitPeer(context.Context) (*rendezvous.SelfInfo, error) {
 	return nil, nil
@@ -33,18 +40,6 @@ func (m *lifecycleMailbox) ReportStats(ctx context.Context, stats transferStats)
 }
 
 func (m *lifecycleMailbox) Close() error { return nil }
-
-type lifecycleQUICConn struct {
-	ctx        context.Context
-	closeCalls int
-}
-
-func (c *lifecycleQUICConn) Context() context.Context { return c.ctx }
-
-func (c *lifecycleQUICConn) CloseWithError(quic.ApplicationErrorCode, string) error {
-	c.closeCalls++
-	return nil
-}
 
 type lifecycleCloser struct {
 	name  string
@@ -99,40 +94,36 @@ func TestFinalizeTransferReportsCompletedStatsBeforeCleanup(t *testing.T) {
 	}
 }
 
-func TestFinishQUICConnection(t *testing.T) {
-	tests := []struct {
-		name       string
-		mode       string
-		peerClosed bool
-		finishDone bool
-		wantCloses int
-	}{
-		{name: "receiver signals verified completion", mode: "recv", wantCloses: 1},
-		{name: "sender observes receiver close", mode: "send", peerClosed: true, wantCloses: 0},
-		{name: "sender closes after finish deadline", mode: "send", finishDone: true, wantCloses: 1},
+// TestMailboxLeaseRefreshesUntilStopped verifies long transfers renew their
+// authenticated mailbox session without leaking a background goroutine.
+func TestMailboxLeaseRefreshesUntilStopped(t *testing.T) {
+	refreshed := make(chan rendezvous.SelfInfo, 1)
+	var refreshCount atomic.Int32
+	mbox := &lifecycleMailbox{store: func(_ context.Context, info rendezvous.SelfInfo) error {
+		refreshCount.Add(1)
+		select {
+		case refreshed <- info:
+		default:
+		}
+		return nil
+	}}
+	self := rendezvous.SelfInfo{Public: "203.0.113.8:4242"}
+	stop := startMailboxLease(context.Background(), mbox, self, 5*time.Millisecond, nil)
+
+	select {
+	case got := <-refreshed:
+		if got.Public != self.Public {
+			t.Fatalf("refreshed info = %+v; want %+v", got, self)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("mailbox lease was not refreshed")
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			peerCtx := context.Background()
-			if tt.peerClosed {
-				var cancel context.CancelFunc
-				peerCtx, cancel = context.WithCancel(peerCtx)
-				cancel()
-			}
-			finishCtx := context.Background()
-			if tt.finishDone {
-				var cancel context.CancelFunc
-				finishCtx, cancel = context.WithCancel(finishCtx)
-				cancel()
-			}
-			conn := &lifecycleQUICConn{ctx: peerCtx}
-
-			finishQUICConnection(finishCtx, conn, tt.mode)
-
-			if conn.closeCalls != tt.wantCloses {
-				t.Fatalf("CloseWithError calls = %d; want %d", conn.closeCalls, tt.wantCloses)
-			}
-		})
+	stop()
+	stop()
+	stoppedCount := refreshCount.Load()
+	time.Sleep(25 * time.Millisecond)
+	if got := refreshCount.Load(); got != stoppedCount {
+		t.Fatalf("refresh count after stop = %d; want %d", got, stoppedCount)
 	}
 }
 
@@ -149,5 +140,23 @@ func TestNewICECleanupClosesPacketTransportAndAgentOnce(t *testing.T) {
 
 	if want := []string{"packet", "transport", "agent"}; !reflect.DeepEqual(order, want) {
 		t.Fatalf("cleanup order = %v; want %v", order, want)
+	}
+}
+
+// TestDrainRaceLosersCleansLateSuccesses verifies direct and relay resources
+// that finish after a winner are not left alive in buffered result channels.
+func TestDrainRaceLosersCleansLateSuccesses(t *testing.T) {
+	direct := make(chan directRaceResult, 1)
+	relay := make(chan relayRaceResult, 1)
+	var closed []string
+	direct <- directRaceResult{discard: func() { closed = append(closed, "direct") }}
+	relay <- relayRaceResult{discard: func() { closed = append(closed, "relay") }}
+	close(direct)
+	close(relay)
+
+	drainRaceLosers(direct, relay)
+
+	if want := []string{"direct", "relay"}; !reflect.DeepEqual(closed, want) {
+		t.Fatalf("cleanup order = %v; want %v", closed, want)
 	}
 }

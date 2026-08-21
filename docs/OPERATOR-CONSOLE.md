@@ -49,9 +49,9 @@ Removing a session interrupts clients that still depend on mailbox rendezvous. I
 ## Interpreting activity
 
 - `Live / unresolved` means the session has no final client report. It does not prove that a client process is still connected.
-- `P2P` and `Relay` results are reported by clients after transfer completion.
+- `P2P` and `Relay` results are reported by clients after transfer completion. If both peers report, the receiver's outcome is authoritative because it confirms whether the destination file was accepted.
 - Relay connection and byte counters come from the UDP relay itself.
-- `TTL left` is read from Redis, so it reflects the key's actual remaining lifetime.
+- `TTL left` is read from Redis, so it reflects the key's actual remaining lifetime. During a transfer, authenticated clients refresh their mailbox session every two minutes so transfers longer than the default ten-minute TTL can still publish their final result. Refreshes never extend a mailbox session beyond its twelve-hour absolute lifetime.
 
 For host-level diagnostics, continue to use systemd logs alongside the console:
 

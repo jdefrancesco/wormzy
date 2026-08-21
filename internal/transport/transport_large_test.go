@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"os"
@@ -24,13 +25,26 @@ func (r tReporter) Stage(stage Stage, state StageState, detail string) {
 	r.t.Logf("stage %s %v %s", stage, state, detail)
 }
 
-// Integration-ish check: loopback transfer of a multi-MB file with idle timeouts enforced.
-// Skipped under -short to keep CI quick.
+// TestLargeTransferLoopback verifies a multi-MiB transfer with idle timeouts enforced.
 func TestLargeTransferLoopback(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping large transfer in short mode")
 	}
+	srcData := make([]byte, 2*1024*1024)
+	if _, err := rand.Read(srcData); err != nil {
+		t.Fatalf("rand.Read: %v", err)
+	}
+	testTransferLoopback(t, "large.bin", srcData)
+}
 
+// TestEmptyTransferLoopback verifies metadata follows the header directly for a zero-byte file.
+func TestEmptyTransferLoopback(t *testing.T) {
+	testTransferLoopback(t, "empty.bin", nil)
+}
+
+// testTransferLoopback transfers payload through the complete loopback protocol and compares it on disk.
+func testTransferLoopback(t *testing.T, filename string, srcData []byte) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
@@ -40,18 +54,13 @@ func TestLargeTransferLoopback(t *testing.T) {
 	}
 	defer mini.Close()
 
-	// Build a multi-MiB random file.
 	tmpDir := t.TempDir()
-	srcPath := filepath.Join(tmpDir, "large.bin")
-	srcData := make([]byte, 2*1024*1024)
-	if _, err := rand.Read(srcData); err != nil {
-		t.Fatalf("rand.Read: %v", err)
-	}
+	srcPath := filepath.Join(tmpDir, filename)
 	if err := os.WriteFile(srcPath, srcData, 0o600); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
 
-	code := "test-large-01"
+	code := testPairingCode
 	idle := 20 * time.Second
 
 	recvDir := filepath.Join(tmpDir, "recv")
@@ -90,15 +99,12 @@ func TestLargeTransferLoopback(t *testing.T) {
 		t.Fatalf("sender run: %v", err)
 	}
 
-	dstPath := filepath.Join(recvDir, "large.bin")
+	dstPath := filepath.Join(recvDir, filename)
 	dstData, err := os.ReadFile(dstPath)
 	if err != nil {
 		t.Fatalf("read dst: %v", err)
 	}
-	if len(dstData) != len(srcData) {
-		t.Fatalf("size mismatch: src %d dst %d", len(srcData), len(dstData))
-	}
-	if string(dstData) != string(srcData) {
+	if !bytes.Equal(dstData, srcData) {
 		t.Fatalf("content mismatch after transfer")
 	}
 }

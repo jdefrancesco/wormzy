@@ -8,9 +8,11 @@ Type=simple
 User=wormzy
 Group=wormzy
 Environment=WORMZY_RELAY_LISTEN=:3478
+Environment=WORMZY_RELAY_PAIR_IDLE=5m
+Environment=WORMZY_RELAY_PAIR_LIFETIME=12h
 EnvironmentFile=-/etc/wormzy/mailbox.env
 EnvironmentFile=-/etc/wormzy/relay.env
-ExecStart=/usr/local/bin/relay -listen ${WORMZY_RELAY_LISTEN}
+ExecStart=/usr/local/bin/relay -listen ${WORMZY_RELAY_LISTEN} -pair-idle ${WORMZY_RELAY_PAIR_IDLE} -pair-lifetime ${WORMZY_RELAY_PAIR_LIFETIME}
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=65535

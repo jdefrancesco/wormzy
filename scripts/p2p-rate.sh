@@ -214,9 +214,13 @@ stop_pid() {
 extract_code() {
   local line file
   for file in "$@"; do
-    line="$(grep -m1 -E "rendezvous assigned code |STAGE rendezvous running code " "$file" 2>/dev/null || true)"
+    line="$(grep -m1 -E "Pairing code: |rendezvous assigned code |STAGE rendezvous running code " "$file" 2>/dev/null || true)"
     if [[ -n "$line" ]]; then
       case "$line" in
+        *"Pairing code: "*)
+          echo "${line##*Pairing code: }"
+          return 0
+          ;;
         *"rendezvous assigned code "*)
           echo "${line##*rendezvous assigned code }"
           return 0

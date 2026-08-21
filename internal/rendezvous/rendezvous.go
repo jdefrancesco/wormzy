@@ -5,12 +5,12 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"math/big"
 	"net"
 	"strings"
 	"sync"
@@ -28,6 +28,9 @@ const (
 	msgErr   = "err"
 	msgPAKE1 = "pake1"
 	msgPAKE2 = "pake2"
+
+	generatedCodeBytes     = 12
+	generatedCodeGroupSize = 4
 )
 
 // Server implements the rendezvous relay responsible for pairing senders and
@@ -182,7 +185,13 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 
 func (s *Server) handlePeer(ctx context.Context, conn net.Conn, reader *bufio.Reader, code string, isSender bool) {
 	if isSender && code == "" {
-		code = s.generateCode()
+		var err error
+		code, err = s.generateCode()
+		if err != nil {
+			s.log().Error("generate pairing code", "err", err)
+			writeErr(conn, "pairing code generation unavailable")
+			return
+		}
 	}
 
 	if !isSender && code == "" {
@@ -287,9 +296,10 @@ func (s *Server) bucket(code string) *waiting {
 	return w
 }
 
-func (s *Server) generateCode() string {
+// generateCode returns a server-provided code when configured or a secure default.
+func (s *Server) generateCode() (string, error) {
 	if s.CodeGenerator != nil {
-		return s.CodeGenerator()
+		return s.CodeGenerator(), nil
 	}
 	return defaultCode()
 }
@@ -301,18 +311,60 @@ func (s *Server) log() *slog.Logger {
 	return slog.Default()
 }
 
-func defaultCode() string {
-	n, err := rand.Int(rand.Reader, big.NewInt(1<<24))
-	if err != nil {
-		return fmt.Sprintf("%06x", time.Now().UnixNano()%0xffffff)
-	}
-	val := n.Uint64()
-	return fmt.Sprintf("%04x-%02x", val&0xffff, (val>>16)&0xff)
+// defaultCode generates one canonical pairing code from the system RNG.
+func defaultCode() (string, error) {
+	return generateCodeFrom(rand.Reader)
 }
 
 // GenerateCode returns a new human-friendly pairing code.
-func GenerateCode() string {
+// GenerateCode returns a cryptographically random canonical pairing code.
+func GenerateCode() (string, error) {
 	return defaultCode()
+}
+
+// NormalizeCode validates a Wormzy pairing code and returns its canonical
+// lowercase, grouped representation.
+func NormalizeCode(code string) (string, error) {
+	code = strings.ToLower(strings.TrimSpace(code))
+	parts := strings.Split(code, "-")
+	if len(parts) != 5 {
+		return "", errors.New("pairing code must contain five groups of four characters")
+	}
+	for _, part := range parts {
+		if len(part) != generatedCodeGroupSize {
+			return "", errors.New("pairing code groups must contain four characters")
+		}
+	}
+	compact := strings.Join(parts, "")
+	decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(compact))
+	if err != nil || len(decoded) != generatedCodeBytes {
+		return "", errors.New("pairing code is not valid base32")
+	}
+	reencoded := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(decoded))
+	if reencoded != compact {
+		return "", errors.New("pairing code has invalid trailing bits")
+	}
+	return strings.Join(parts, "-"), nil
+}
+
+// generateCodeFrom encodes 96 bits from a cryptographic random source into
+// lowercase, grouped base32 without discarding entropy.
+func generateCodeFrom(random io.Reader) (string, error) {
+	raw := make([]byte, generatedCodeBytes)
+	if _, err := io.ReadFull(random, raw); err != nil {
+		return "", fmt.Errorf("read pairing-code randomness: %w", err)
+	}
+	encoded := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw))
+	groups := make([]string, 0, (len(encoded)+generatedCodeGroupSize-1)/generatedCodeGroupSize)
+	for len(encoded) > 0 {
+		take := generatedCodeGroupSize
+		if len(encoded) < take {
+			take = len(encoded)
+		}
+		groups = append(groups, encoded[:take])
+		encoded = encoded[take:]
+	}
+	return NormalizeCode(strings.Join(groups, "-"))
 }
 
 func expectSelf(r *bufio.Reader) (*SelfInfo, error) {

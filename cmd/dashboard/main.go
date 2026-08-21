@@ -91,6 +91,7 @@ const (
 type controlAction struct {
 	kind     controlKind
 	code     string
+	label    string
 	draining bool
 }
 
@@ -162,8 +163,9 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			m.pending = &controlAction{
-				kind: controlTerminate,
-				code: m.metrics.Active[m.selectedSession].Code,
+				kind:  controlTerminate,
+				code:  m.metrics.Active[m.selectedSession].ID,
+				label: m.metrics.Active[m.selectedSession].Code,
 			}
 		case "d":
 			if m.metrics == nil {
@@ -298,7 +300,7 @@ func executeControlCmd(mc *transport.MetricsCollector, action controlAction) tea
 			if err := mc.TerminateSession(ctx, action.code); err != nil {
 				return controlMsg{err: err}
 			}
-			return controlMsg{message: fmt.Sprintf("Session %s removed", action.code)}
+			return controlMsg{message: fmt.Sprintf("Session %s removed", action.label)}
 		default:
 			return controlMsg{err: fmt.Errorf("unknown operator action %q", action.kind)}
 		}
@@ -518,7 +520,7 @@ func renderControlPanel(metrics *transport.RelayMetrics, pending *controlAction,
 		var prompt string
 		switch pending.kind {
 		case controlTerminate:
-			prompt = fmt.Sprintf("Remove session %s? This cannot stop an established P2P connection.", truncateMiddle(safeTerminalText(pending.code), 32))
+			prompt = fmt.Sprintf("Remove session %s? This cannot stop an established P2P connection.", truncateMiddle(safeTerminalText(pending.label), 32))
 		case controlDrain:
 			if pending.draining {
 				prompt = "Stop accepting new sessions? Existing transfers are left alone."
@@ -792,6 +794,9 @@ func renderHelp() string {
 		"  noise-failed  QUIC connected but crypto handshake failed",
 		"",
 		warningStyle.Render("Candidate Types:"),
+		"  ice-p2p       Direct path selected by ICE (LAN or NAT traversal)",
+		"  ice-relay     Authenticated TURN path selected by ICE",
+		"  upnp          Direct path through a temporary router mapping",
 		"  reflexive     Public IP from STUN (typical NAT-to-NAT)",
 		"  local         LAN address (same network)",
 		"  relay         Fallback relay server",
@@ -799,7 +804,7 @@ func renderHelp() string {
 		"",
 		titleStyle.Render("Optimization Tips"),
 		"",
-		"  • Same-LAN transfers should ALWAYS be P2P via 'local'",
+		"  • Same-LAN transfers should normally be P2P via 'ice-p2p' or 'local'",
 		"  • Target 70-80% P2P for typical home/mobile scenarios",
 		"  • High 'quic-timeout' → increase relay fallback delay",
 		"  • High 'no-response' → check STUN servers",

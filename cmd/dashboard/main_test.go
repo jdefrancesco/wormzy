@@ -30,13 +30,14 @@ func TestRenderServicePanel_ShowsServerActivity(t *testing.T) {
 func TestDashboardModel_RequiresConfirmationForControls(t *testing.T) {
 	model := dashboardModel{
 		metrics: &transport.RelayMetrics{
-			Active: []transport.SessionSnapshot{{Code: "active-01"}},
+			Active: []transport.SessionSnapshot{{ID: "internal-session-id", Code: "m-active01"}},
 		},
 	}
 
 	updated, _ := model.Update(keyMsg("x"))
 	afterTerminate := updated.(dashboardModel)
-	if afterTerminate.pending == nil || afterTerminate.pending.kind != controlTerminate || afterTerminate.pending.code != "active-01" {
+	if afterTerminate.pending == nil || afterTerminate.pending.kind != controlTerminate ||
+		afterTerminate.pending.code != "internal-session-id" || afterTerminate.pending.label != "m-active01" {
 		t.Fatalf("terminate action was not staged: %+v", afterTerminate.pending)
 	}
 	updated, _ = afterTerminate.Update(keyMsg("n"))
@@ -59,5 +60,15 @@ func TestSafeTerminalText_StripsControlAndFormatRunes(t *testing.T) {
 	got := safeTerminalText("ok\x1b[31m\u202ebad")
 	if got != "ok[31mbad" {
 		t.Fatalf("safeTerminalText = %q; want %q", got, "ok[31mbad")
+	}
+}
+
+// TestRenderHelpDescribesCurrentCandidates keeps operator guidance aligned with telemetry labels.
+func TestRenderHelpDescribesCurrentCandidates(t *testing.T) {
+	got := renderHelp()
+	for _, want := range []string{"ice-p2p", "ice-relay", "upnp", "normally be P2P"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("help missing %q:\n%s", want, got)
+		}
 	}
 }

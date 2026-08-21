@@ -27,6 +27,7 @@ go run ./cmd/dashboard -redis rediss://your-redis-url -refresh 5s
 
 3. **Candidate Usage**
    - `reflexive`: Public IP from STUN
+   - `upnp`: Validated router mapping used by the legacy path after ICE failure
    - `local`: LAN address
    - `relay`: Fallback relay
    - `loopback`: Local testing
@@ -69,6 +70,7 @@ Direct Outcomes:
 
 Candidate Distribution:
 - reflexive: ___
+- upnp: ___
 - local: ___
 - relay: ___
 
@@ -80,17 +82,21 @@ Common Failures:
 
 ## Step 2: Analyze Current Timing Configuration
 
+### Progressive Connection Order
+
+The pairing code is claimed and displayed before discovery. Wormzy publishes initial local and reflexive metadata, derives the CPace key, and tries Pion ICE on Pion-owned sockets. Immediately before Pion begins `Dial`/`Accept` connectivity checks, Wormzy arms a `1.5s` timer. If ICE remains unresolved, it starts a cancellable UPnP mapping for the separate legacy UDP socket. An ICE win removes that mapping. An ICE failure triggers a PAKE-authenticated readiness exchange and candidate refresh before the legacy direct race begins. Explicitly configured TURN candidates can win inside the initial ICE attempt; the custom Wormzy relay remains last.
+
 ### Current P2P Race Timing
 
-From `internal/transport/transport.go`:
+The following constants apply to the legacy race in `internal/transport/transport.go`:
 
 ```go
-// Constants (lines 43-54)
+// Legacy race constants
 relayFallbackDelay  = 4 * time.Second   // How long to wait before trying relay
 relayRetryDelay     = 3 * time.Second   // Delay between relay retry attempts
 relayAttemptTimeout = 6 * time.Second   // Timeout for individual relay dial
 
-// Dial schedule (lines 424-438)
+// Legacy direct dial schedule
 baseDelay := 0ms (recv) or 200ms (send)
 
 Attempt 1: baseDelay + 0ms
@@ -201,10 +207,9 @@ if cand.Type == "reflexive" {
 }
 ```
 
-**3. Parallel STUN probes**
-Already implemented well in `internal/stun/stun.go:68-77`
-- Sends to all servers concurrently
-- First success wins
+**3. Revisit shared-socket STUN probing only with evidence**
+
+`DiscoverOnConn` currently probes a shuffled server list sequentially. This preserves a single legacy socket and avoids concurrent readers consuming one another's STUN responses. Pion ICE performs its own separate gathering on Pion-owned sockets. Any parallelization of the legacy probes must keep response demultiplexing and NAT-mapping consistency correct.
 
 ### Do NOT Change (Without Good Reason)
 
@@ -248,6 +253,9 @@ grep "direct race" logs.txt
 # See STUN discovery
 grep "STUN" logs.txt
 
+# Check delayed mapping, authenticated refresh, and cleanup
+grep "upnp/fallback\|upnp/cleanup" logs.txt
+
 # Relay fallback triggers
 grep "falling back to relay" logs.txt
 ```
@@ -258,11 +266,11 @@ grep "falling back to relay" logs.txt
 # Connect to Redis
 redis-cli -u rediss://your-redis-url
 
-# List active sessions
-KEYS wormzy:sessions:*
+# List active protocol-v2 sessions without blocking Redis
+SCAN 0 MATCH wormzy:v2:sessions:* COUNT 100
 
-# Inspect a session
-GET wormzy:sessions:<code>
+# Inspect a session by its opaque mbx2 identifier, not its pairing code
+GET wormzy:v2:sessions:<opaque-session-id>
 
 # Check DirectOutcome and DirectSummary fields
 ```
@@ -307,21 +315,27 @@ Key files for P2P tuning:
 
 ```
 internal/transport/transport.go
-├── Lines 43-54:   Timing constants
-├── Lines 424-438: Dial attempt schedule  
-├── Lines 469-555: Relay fallback logic
-├── Lines 557-707: Race waitLoop
-└── Lines 1619+:   punchLoop implementation
+├── Run:            Pairing, discovery, ICE-first orchestration, and fallback
+├── launchDial:     Legacy direct attempt schedule
+├── waitLoop:       Direct-versus-relay race
+└── punchLoop:      Legacy punch packets
 
 internal/transport/dilation.go
-├── Lines 17-46:  buildCandidates (priority ordering)
-├── Lines 48-122: selectPeerCandidates (LAN detection)
-└── Lines 124-137: candidateRaceWeight (local vs reflexive)
+├── buildCandidates:       Candidate construction
+├── selectPeerCandidates:  LAN detection and candidate filtering
+└── candidateRaceWeight:   Local, UPnP, and reflexive priority
 
 internal/stun/stun.go
-├── Lines 14-24:  STUN server list
-├── Lines 39-51:  NewStun + discovery
-└── Lines 105-164: probeServer (individual STUN query)
+├── StunServers:       Default server list
+├── DiscoverOnConn:    Sequential shuffled-list probing on the legacy socket
+└── probeWithConn:     Individual shared-socket STUN query
+
+internal/transport/ice_path.go
+└── runICEConnect:     Pion-owned ICE gathering and connectivity checks
+
+internal/transport/progressive_upnp.go
+├── startDelayedUPnPFallback: Delayed, cancellable legacy-socket mapping
+└── synchronizeUPnPFallback: Authenticated readiness and candidate refresh
 ```
 
 ## Next Steps

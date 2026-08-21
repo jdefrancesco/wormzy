@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -81,6 +82,7 @@ type ServiceSnapshot struct {
 
 // SessionSnapshot summarizes a single rendezvous session for dashboards.
 type SessionSnapshot struct {
+	ID            string
 	Code          string
 	Mode          string
 	State         string
@@ -151,7 +153,7 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 	}
 	report.Services = services
 	var totalDuration time.Duration
-	pattern := fmt.Sprintf("%s:sessions:*", mc.prefix)
+	pattern := fmt.Sprintf("%s:v2:sessions:*", mc.prefix)
 	var cursor uint64
 	for {
 		keys, nextCursor, err := mc.client.Scan(ctx, cursor, pattern, 200).Result()
@@ -178,6 +180,9 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 				}
 				var sess rendezvousSession
 				if err := json.Unmarshal(data, &sess); err != nil {
+					continue
+				}
+				if !validMailboxSessionID(sess.Code) {
 					continue
 				}
 				report.TotalSessions++
@@ -208,8 +213,11 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 						} else {
 							report.P2PTransfers++
 						}
-						report.TotalBytes += sess.Stats.Bytes
-						totalDuration += time.Duration(sess.Stats.DurationMillis) * time.Millisecond
+						report.TotalBytes = saturatingMetricsAdd(report.TotalBytes, sess.Stats.Bytes)
+						totalDuration = time.Duration(saturatingMetricsAdd(
+							int64(totalDuration),
+							int64(metricsDurationFromMillis(sess.Stats.DurationMillis)),
+						))
 					} else {
 						report.FailedSessions++
 						errKey := normalizeMetricsError(sess.Stats.Error)
@@ -250,6 +258,28 @@ func (mc *MetricsCollector) Collect(ctx context.Context) (*RelayMetrics, error) 
 		}
 	}
 	return report, nil
+}
+
+// saturatingMetricsAdd prevents corrupted or legacy counters from wrapping dashboard totals.
+func saturatingMetricsAdd(total, value int64) int64 {
+	if value <= 0 {
+		return total
+	}
+	if total > math.MaxInt64-value {
+		return math.MaxInt64
+	}
+	return total + value
+}
+
+// metricsDurationFromMillis converts untrusted persisted data without integer wraparound.
+func metricsDurationFromMillis(milliseconds int64) time.Duration {
+	if milliseconds <= 0 {
+		return 0
+	}
+	if milliseconds > math.MaxInt64/int64(time.Millisecond) {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(milliseconds) * time.Millisecond
 }
 
 func (mc *MetricsCollector) controlKey() string {
@@ -367,18 +397,25 @@ func (mc *MetricsCollector) SetDraining(ctx context.Context, draining bool) erro
 
 // TerminateSession removes one rendezvous session. It cannot terminate an
 // already-established direct P2P connection, which no longer traverses Redis.
-func (mc *MetricsCollector) TerminateSession(ctx context.Context, code string) error {
-	code = strings.TrimSpace(code)
-	if code == "" || len(code) > 128 || strings.ContainsAny(code, "\r\n") {
-		return fmt.Errorf("invalid session code")
+func (mc *MetricsCollector) TerminateSession(ctx context.Context, sessionID string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if !validMailboxSessionID(sessionID) {
+		return fmt.Errorf("invalid session identifier")
 	}
-	key := fmt.Sprintf("%s:sessions:%s", mc.prefix, code)
-	deleted, err := mc.client.Del(ctx, key).Result()
+	key := fmt.Sprintf("%s:v2:sessions:%s", mc.prefix, sessionID)
+	activeKey := fmt.Sprintf("%s:v2:active-sessions", mc.prefix)
+	var deleteCommand *redis.IntCmd
+	_, err := mc.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		deleteCommand = pipe.Del(ctx, key)
+		pipe.ZRem(ctx, activeKey, sessionID)
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("terminate session %s: %w", code, err)
+		return fmt.Errorf("terminate session: %w", err)
 	}
+	deleted := deleteCommand.Val()
 	if deleted == 0 {
-		return fmt.Errorf("terminate session %s: %w", code, errSessionNotFound)
+		return fmt.Errorf("terminate session: %w", errSessionNotFound)
 	}
 	return nil
 }
@@ -434,7 +471,8 @@ func snapshotFromSession(sess *rendezvousSession, now time.Time) SessionSnapshot
 		remaining = 0
 	}
 	snap := SessionSnapshot{
-		Code:         sess.Code,
+		ID:           sess.Code,
+		Code:         mailboxSessionAlias(sess.Code),
 		CreatedAt:    created,
 		ExpiresAt:    expires,
 		TTLRemaining: remaining,

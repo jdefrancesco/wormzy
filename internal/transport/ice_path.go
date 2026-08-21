@@ -1,16 +1,23 @@
 package transport
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pion/ice/v4"
 	pionstun "github.com/pion/stun/v3"
@@ -19,17 +26,30 @@ import (
 	"github.com/jdefrancesco/wormzy/internal/rendezvous"
 )
 
-const featureICEv1 = "ice-v1"
+const (
+	featureICEv1                = "ice-v1"
+	iceAuthMACLabel             = "wormzy-ice-auth-v1"
+	iceCandidatesMACLabel       = "wormzy-ice-candidates-v1"
+	maxICEAuthMessageSize       = 4096
+	maxICECandidatesMessageSize = 64 << 10
+	maxICECredentialLength      = 256
+	maxICECandidateCount        = 32
+	maxICECandidateLength       = 2048
+)
 
 var errICESkipped = errors.New("ice path skipped")
 
 type iceAuthMessage struct {
+	Role  string `json:"role"`
 	Ufrag string `json:"ufrag"`
 	Pwd   string `json:"pwd"`
+	MAC   string `json:"mac"`
 }
 
 type iceCandidatesMessage struct {
+	Role       string   `json:"role"`
 	Candidates []string `json:"candidates"`
+	MAC        string   `json:"mac"`
 }
 
 type iceQUICSession struct {
@@ -41,11 +61,6 @@ type iceQUICSession struct {
 
 type icePacketConn struct {
 	conn *ice.Conn
-}
-
-type quicConnectionCloser interface {
-	Context() context.Context
-	CloseWithError(quic.ApplicationErrorCode, string) error
 }
 
 type iceResourceCloser interface {
@@ -99,22 +114,6 @@ func (p *icePacketConn) SetWriteBuffer(n int) error {
 	return nil
 }
 
-func finishQUICConnection(ctx context.Context, conn quicConnectionCloser, mode string) {
-	if conn == nil {
-		return
-	}
-	if mode == "recv" {
-		_ = conn.CloseWithError(0, "wormzy transfer complete")
-		return
-	}
-	select {
-	case <-conn.Context().Done():
-		return
-	case <-ctx.Done():
-		_ = conn.CloseWithError(0, "wormzy transfer complete")
-	}
-}
-
 func newICEQUICCleanup(packet, transport, agent iceResourceCloser) func() {
 	var once sync.Once
 	return func() {
@@ -166,7 +165,7 @@ func buildICEURLs(stunServers, turnServers []string, rep Reporter) iceURLSet {
 		u, err := pionstun.ParseURI(uri)
 		if err != nil {
 			if rep != nil {
-				rep.Logf("ice/stun uri parse failed %s: %v", redactICEEndpoint(server), err)
+				rep.Logf("ice/stun uri parse failed %s: %v", RedactICEServerEndpoint(server), err)
 			}
 			continue
 		}
@@ -181,7 +180,7 @@ func buildICEURLs(stunServers, turnServers []string, rep Reporter) iceURLSet {
 		u, err := parseTURNURI(server)
 		if err != nil {
 			if rep != nil {
-				rep.Logf("ice/turn skipped %s: %v", redactICEEndpoint(server), err)
+				rep.Logf("ice/turn skipped %s: %v", RedactICEServerEndpoint(server), err)
 			}
 			continue
 		}
@@ -239,21 +238,322 @@ func parseTURNURI(raw string) (*pionstun.URI, error) {
 	return u, nil
 }
 
-func redactICEEndpoint(raw string) string {
+// RedactICEServerEndpoint returns a validated TURN/STUN endpoint without credentials.
+func RedactICEServerEndpoint(raw string) string {
 	raw = strings.TrimSpace(raw)
-	at := strings.LastIndex(raw, "@")
-	if at == -1 {
-		return raw
+	scheme := "turn"
+	prefix := ""
+	rest := raw
+	lower := strings.ToLower(raw)
+	for _, candidate := range []struct {
+		prefix string
+		scheme string
+	}{
+		{prefix: "turn://", scheme: "turn"},
+		{prefix: "turns://", scheme: "turns"},
+		{prefix: "stun://", scheme: "stun"},
+		{prefix: "stuns://", scheme: "stuns"},
+		{prefix: "turn:", scheme: "turn"},
+		{prefix: "turns:", scheme: "turns"},
+		{prefix: "stun:", scheme: "stun"},
+		{prefix: "stuns:", scheme: "stuns"},
+	} {
+		if strings.HasPrefix(lower, candidate.prefix) {
+			scheme = candidate.scheme
+			prefix = candidate.prefix
+			rest = raw[len(candidate.prefix):]
+			break
+		}
 	}
-	// Keep scheme/host, strip credential material from logs.
-	colon := strings.Index(raw, ":")
-	if colon == -1 || colon > at {
-		return "***@" + raw[at+1:]
+	credentialMarker := ""
+	if at := strings.LastIndex(rest, "@"); at >= 0 {
+		credentialMarker = "***@"
+		rest = rest[at+1:]
 	}
-	return raw[:colon+1] + "***@" + raw[at+1:]
+	parsed, err := pionstun.ParseURI(scheme + ":" + rest)
+	if err != nil {
+		return "(invalid endpoint redacted)"
+	}
+	endpoint := net.JoinHostPort(parsed.Host, strconv.Itoa(parsed.Port))
+	if strings.Contains(rest, "?") && (scheme == "turn" || scheme == "turns") {
+		endpoint += "?transport=" + parsed.Proto.String()
+	}
+	return prefix + credentialMarker + endpoint
 }
 
-func runICEConnect(ctx context.Context, cfg Config, mbox mailbox, rep Reporter) (*ice.Agent, *ice.Conn, error) {
+// newICEAuthMessage creates a PAKE-authenticated ICE credential message.
+func newICEAuthMessage(code, role string, psk []byte, ufrag, pwd string) (iceAuthMessage, error) {
+	message := iceAuthMessage{Role: role, Ufrag: ufrag, Pwd: pwd}
+	if err := validateICEAuthMessage(message); err != nil {
+		return iceAuthMessage{}, err
+	}
+	if code == "" || len(psk) == 0 {
+		return iceAuthMessage{}, errors.New("missing ICE authentication key material")
+	}
+	message.MAC = iceSignalingMAC(iceAuthMACLabel, code, role, []string{ufrag, pwd}, psk)
+	return message, nil
+}
+
+// verifyICEAuthMessage verifies ICE credentials and their PAKE-keyed authenticator.
+func verifyICEAuthMessage(message iceAuthMessage, code, expectedRole string, psk []byte) error {
+	if code == "" || len(psk) == 0 {
+		return errors.New("missing ICE authentication key material")
+	}
+	if message.Role != expectedRole {
+		return fmt.Errorf("ICE credential role %q; want %q", message.Role, expectedRole)
+	}
+	if err := validateICEAuthMessage(message); err != nil {
+		return err
+	}
+	want := iceSignalingMAC(iceAuthMACLabel, code, message.Role, []string{message.Ufrag, message.Pwd}, psk)
+	if !equalHexMAC(message.MAC, want) {
+		return errors.New("ICE credential authentication failed")
+	}
+	return nil
+}
+
+// validateICEAuthMessage enforces strict role and credential bounds.
+func validateICEAuthMessage(message iceAuthMessage) error {
+	if message.Role != "send" && message.Role != "recv" {
+		return fmt.Errorf("invalid ICE credential role %q", message.Role)
+	}
+	for name, value := range map[string]string{"ufrag": message.Ufrag, "password": message.Pwd} {
+		if len(value) == 0 || len(value) > maxICECredentialLength || !printableASCII(value, false) {
+			return fmt.Errorf("ICE %s is invalid", name)
+		}
+	}
+	return nil
+}
+
+// decodeICEAuthMessage strictly decodes a bounded ICE credential message.
+func decodeICEAuthMessage(raw json.RawMessage) (iceAuthMessage, error) {
+	var message iceAuthMessage
+	if err := decodeStrictICEMessage(raw, maxICEAuthMessageSize, &message); err != nil {
+		return iceAuthMessage{}, fmt.Errorf("decode ICE credentials: %w", err)
+	}
+	return message, nil
+}
+
+// newICECandidatesMessage creates a PAKE-authenticated ICE candidate batch.
+func newICECandidatesMessage(code, role string, psk []byte, candidates []string) (iceCandidatesMessage, error) {
+	message := iceCandidatesMessage{Role: role, Candidates: append([]string(nil), candidates...)}
+	if err := validateICECandidatesMessage(message); err != nil {
+		return iceCandidatesMessage{}, err
+	}
+	if code == "" || len(psk) == 0 {
+		return iceCandidatesMessage{}, errors.New("missing ICE candidate authentication key material")
+	}
+	message.MAC = iceSignalingMAC(iceCandidatesMACLabel, code, role, message.Candidates, psk)
+	return message, nil
+}
+
+// verifyICECandidatesMessage verifies a bounded candidate batch and its PAKE-keyed authenticator.
+func verifyICECandidatesMessage(message iceCandidatesMessage, code, expectedRole string, psk []byte) error {
+	if code == "" || len(psk) == 0 {
+		return errors.New("missing ICE candidate authentication key material")
+	}
+	if message.Role != expectedRole {
+		return fmt.Errorf("ICE candidate role %q; want %q", message.Role, expectedRole)
+	}
+	if err := validateICECandidatesMessage(message); err != nil {
+		return err
+	}
+	want := iceSignalingMAC(iceCandidatesMACLabel, code, message.Role, message.Candidates, psk)
+	if !equalHexMAC(message.MAC, want) {
+		return errors.New("ICE candidate authentication failed")
+	}
+	return nil
+}
+
+// validateICECandidatesMessage enforces candidate count, length, and terminal-safety bounds.
+func validateICECandidatesMessage(message iceCandidatesMessage) error {
+	if message.Role != "send" && message.Role != "recv" {
+		return fmt.Errorf("invalid ICE candidate role %q", message.Role)
+	}
+	if len(message.Candidates) > maxICECandidateCount {
+		return fmt.Errorf("ICE candidate count exceeds limit of %d", maxICECandidateCount)
+	}
+	for _, candidate := range message.Candidates {
+		if len(candidate) == 0 || len(candidate) > maxICECandidateLength || !printableASCII(candidate, true) {
+			return errors.New("ICE candidate contains invalid text")
+		}
+	}
+	return nil
+}
+
+// decodeICECandidatesMessage strictly decodes a bounded ICE candidate batch.
+func decodeICECandidatesMessage(raw json.RawMessage) (iceCandidatesMessage, error) {
+	var message iceCandidatesMessage
+	if err := decodeStrictICEMessage(raw, maxICECandidatesMessageSize, &message); err != nil {
+		return iceCandidatesMessage{}, fmt.Errorf("decode ICE candidates: %w", err)
+	}
+	return message, nil
+}
+
+// decodeStrictICEMessage decodes one JSON object with bounded size and no unknown or trailing data.
+func decodeStrictICEMessage(raw json.RawMessage, maxSize int, dst any) error {
+	if len(raw) == 0 || len(raw) > maxSize {
+		return errors.New("invalid ICE message size")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("ICE message contains trailing data")
+	}
+	return nil
+}
+
+// iceSignalingMAC computes a length-delimited, domain-separated signaling authenticator.
+func iceSignalingMAC(label, code, role string, fields []string, psk []byte) string {
+	mac := hmac.New(sha256.New, psk)
+	for _, field := range append([]string{label, code, role}, fields...) {
+		_, _ = mac.Write([]byte(strconv.Itoa(len(field))))
+		_, _ = mac.Write([]byte{':'})
+		_, _ = mac.Write([]byte(field))
+	}
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// equalHexMAC compares encoded authenticators without leaking comparison timing.
+func equalHexMAC(gotText, wantText string) bool {
+	got, err := hex.DecodeString(gotText)
+	if err != nil || len(got) != sha256.Size {
+		return false
+	}
+	want, err := hex.DecodeString(wantText)
+	return err == nil && hmac.Equal(got, want)
+}
+
+// printableASCII rejects control, non-ASCII, and optionally space characters.
+func printableASCII(value string, allowSpace bool) bool {
+	if !utf8.ValidString(value) {
+		return false
+	}
+	for _, char := range value {
+		if char > 0x7e || char < 0x20 || (!allowSpace && char == 0x20) {
+			return false
+		}
+	}
+	return true
+}
+
+// validateRemoteICECandidate limits authenticated peer candidates to UDP4
+// endpoints that ICE can safely probe. Private host candidates remain allowed
+// for same-LAN connectivity, while special-use targets and private relay/STUN
+// claims are rejected.
+func validateRemoteICECandidate(candidate ice.Candidate, loopback bool, localPrivateSubnets []*net.IPNet) error {
+	if candidate == nil {
+		return errors.New("ICE candidate is nil")
+	}
+	if candidate.NetworkType() != ice.NetworkTypeUDP4 || candidate.Component() != 1 {
+		return errors.New("ICE candidate must use UDP4 component 1")
+	}
+	if candidate.Port() <= 0 || candidate.Port() > 65535 {
+		return errors.New("ICE candidate port is invalid")
+	}
+	ip := net.ParseIP(candidate.Address()).To4()
+	if ip == nil {
+		return errors.New("ICE candidate address must be a literal IPv4 address")
+	}
+	if ip.IsLoopback() {
+		if loopback && candidate.Type() == ice.CandidateTypeHost {
+			return nil
+		}
+		return errors.New("ICE loopback candidate is disabled")
+	}
+	if ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || !ip.IsGlobalUnicast() {
+		return errors.New("ICE candidate address is not usable")
+	}
+	switch candidate.Type() {
+	case ice.CandidateTypeHost:
+		if ip.IsPrivate() {
+			if !ipInDirectlyConnectedSubnet(ip, localPrivateSubnets) {
+				return errors.New("ICE private host candidate is outside a directly connected subnet")
+			}
+			return nil
+		}
+		if !isUsableExternalIPv4(ip) {
+			return errors.New("ICE host candidate must use a connected private or public IPv4 address")
+		}
+		return nil
+	case ice.CandidateTypeServerReflexive, ice.CandidateTypePeerReflexive, ice.CandidateTypeRelay:
+		if !isUsableExternalIPv4(ip) {
+			return errors.New("ICE non-host candidate must use a public IPv4 address")
+		}
+		return nil
+	default:
+		return errors.New("ICE candidate type is unsupported")
+	}
+}
+
+// localPrivateIPv4Subnets returns bounded RFC 1918 networks configured on active interfaces.
+func localPrivateIPv4Subnets() ([]*net.IPNet, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("list local interfaces for ICE validation: %w", err)
+	}
+	const maxSubnets = 64
+	subnets := make([]*net.IPNet, 0)
+	seen := make(map[string]struct{})
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addresses, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			ipNet, ok := address.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipNet.IP.To4()
+			if ip == nil || !ip.IsPrivate() {
+				continue
+			}
+			network := &net.IPNet{IP: append(net.IP(nil), ip.Mask(ipNet.Mask)...), Mask: append(net.IPMask(nil), ipNet.Mask...)}
+			key := network.String()
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			subnets = append(subnets, network)
+			if len(subnets) == maxSubnets {
+				return subnets, nil
+			}
+		}
+	}
+	return subnets, nil
+}
+
+// ipInDirectlyConnectedSubnet reports whether an IPv4 address belongs to an approved local network.
+func ipInDirectlyConnectedSubnet(ip net.IP, subnets []*net.IPNet) bool {
+	ip = ip.To4()
+	if ip == nil {
+		return false
+	}
+	for _, subnet := range subnets {
+		if subnet != nil && subnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// runICEConnectWithSignal establishes ICE and reports when connectivity checks are about to start.
+func runICEConnectWithSignal(
+	ctx context.Context,
+	cfg Config,
+	mbox mailbox,
+	rep Reporter,
+	code string,
+	psk []byte,
+	checksStarted func(),
+) (*ice.Agent, *ice.Conn, error) {
 	stunServers := cfg.stunServers()
 	turnServers := cfg.turnServers()
 	serverSet := buildICEURLs(stunServers, turnServers, rep)
@@ -350,11 +650,21 @@ func runICEConnect(ctx context.Context, cfg Config, mbox mailbox, rep Reporter) 
 		_ = agent.Close()
 		return nil, nil, err
 	}
-	if err := mbox.Send(ctx, "ice-auth", iceAuthMessage{Ufrag: ufrag, Pwd: pwd}); err != nil {
+	localAuth, err := newICEAuthMessage(code, cfg.Mode, psk, ufrag, pwd)
+	if err != nil {
 		_ = agent.Close()
 		return nil, nil, err
 	}
-	if err := mbox.Send(ctx, "ice-candidates", iceCandidatesMessage{Candidates: localCopy}); err != nil {
+	localCandidates, err := newICECandidatesMessage(code, cfg.Mode, psk, localCopy)
+	if err != nil {
+		_ = agent.Close()
+		return nil, nil, err
+	}
+	if err := mbox.Send(ctx, "ice-auth", localAuth); err != nil {
+		_ = agent.Close()
+		return nil, nil, err
+	}
+	if err := mbox.Send(ctx, "ice-candidates", localCandidates); err != nil {
 		_ = agent.Close()
 		return nil, nil, err
 	}
@@ -366,31 +676,42 @@ func runICEConnect(ctx context.Context, cfg Config, mbox mailbox, rep Reporter) 
 		haveCands   bool
 	)
 	for !(haveAuth && haveCands) {
-		msg, err := mbox.Receive(ctx)
+		msg, err := receiveMailboxType(ctx, mbox, "ice-auth", "ice-candidates")
 		if err != nil {
 			_ = agent.Close()
 			return nil, nil, err
 		}
 		switch msg.Type {
 		case "ice-auth":
-			if err := json.Unmarshal(msg.Body, &remoteAuth); err != nil {
+			remoteAuth, err = decodeICEAuthMessage(msg.Body)
+			if err != nil {
 				_ = agent.Close()
 				return nil, nil, err
 			}
-			haveAuth = remoteAuth.Ufrag != "" && remoteAuth.Pwd != ""
+			if err := verifyICEAuthMessage(remoteAuth, code, oppositeRole(cfg.Mode), psk); err != nil {
+				_ = agent.Close()
+				return nil, nil, err
+			}
+			haveAuth = true
 		case "ice-candidates":
-			if err := json.Unmarshal(msg.Body, &remoteCands); err != nil {
+			remoteCands, err = decodeICECandidatesMessage(msg.Body)
+			if err != nil {
+				_ = agent.Close()
+				return nil, nil, err
+			}
+			if err := verifyICECandidatesMessage(remoteCands, code, oppositeRole(cfg.Mode), psk); err != nil {
 				_ = agent.Close()
 				return nil, nil, err
 			}
 			haveCands = true
-		default:
-			if rep != nil {
-				rep.Logf("ice/mailbox ignoring message type=%s", msg.Type)
-			}
 		}
 	}
 
+	privateSubnets, subnetErr := localPrivateIPv4Subnets()
+	if subnetErr != nil && rep != nil {
+		rep.Logf("ice/local subnet discovery failed: %v", subnetErr)
+	}
+	addedRemoteCandidates := 0
 	for _, raw := range remoteCands.Candidates {
 		cand, err := ice.UnmarshalCandidate(raw)
 		if err != nil {
@@ -399,15 +720,30 @@ func runICEConnect(ctx context.Context, cfg Config, mbox mailbox, rep Reporter) 
 			}
 			continue
 		}
+		if err := validateRemoteICECandidate(cand, cfg.Loopback, privateSubnets); err != nil {
+			if rep != nil {
+				rep.Logf("ice/remote candidate rejected: %v", err)
+			}
+			continue
+		}
 		if err := agent.AddRemoteCandidate(cand); err != nil {
 			if rep != nil {
 				rep.Logf("ice/add remote candidate failed: %v", err)
 			}
+			continue
 		}
+		addedRemoteCandidates++
+	}
+	if addedRemoteCandidates == 0 {
+		_ = agent.Close()
+		return nil, nil, errors.New("peer did not provide any safe ICE candidates")
 	}
 	_ = agent.AddRemoteCandidate(nil)
 	if rep != nil {
-		rep.Logf("ice/remote candidates added=%d", len(remoteCands.Candidates))
+		rep.Logf("ice/remote candidates added=%d", addedRemoteCandidates)
+	}
+	if checksStarted != nil {
+		checksStarted()
 	}
 
 	var conn *ice.Conn
@@ -423,7 +759,17 @@ func runICEConnect(ctx context.Context, cfg Config, mbox mailbox, rep Reporter) 
 	return agent, conn, nil
 }
 
-func attemptICEQUICSession(ctx context.Context, cfg Config, mbox mailbox, rep Reporter, peer rendezvous.SelfInfo) (*iceQUICSession, error) {
+// attemptICEQUICSession runs authenticated ICE signaling and establishes QUIC over the winning pair.
+func attemptICEQUICSession(
+	ctx context.Context,
+	cfg Config,
+	mbox mailbox,
+	rep Reporter,
+	peer rendezvous.SelfInfo,
+	code string,
+	psk []byte,
+	checksStarted func(),
+) (*iceQUICSession, error) {
 	if !peerSupportsFeature(peer, featureICEv1) {
 		return nil, errICESkipped
 	}
@@ -433,7 +779,7 @@ func attemptICEQUICSession(ctx context.Context, cfg Config, mbox mailbox, rep Re
 	iceCtx, cancelICE := context.WithTimeout(ctx, iceBudget)
 	defer cancelICE()
 
-	agent, iceConn, err := runICEConnect(iceCtx, cfg, mbox, rep)
+	agent, iceConn, err := runICEConnectWithSignal(iceCtx, cfg, mbox, rep, code, psk, checksStarted)
 	if err != nil {
 		return nil, err
 	}
@@ -445,7 +791,9 @@ func attemptICEQUICSession(ctx context.Context, cfg Config, mbox mailbox, rep Re
 		return nil, err
 	}
 	serverTLS.NextProtos = []string{alpn}
-	clientTLS := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{alpn}}
+	// ICE credentials and the following PAKE proof authenticate the peer; the
+	// short-lived QUIC TLS certificate provides only transport encryption.
+	clientTLS := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{alpn}} // #nosec G402 -- PAKE authenticates the selected peer.
 	quicConf := &quic.Config{
 		KeepAlivePeriod:      15 * time.Second,
 		MaxIdleTimeout:       cfg.IdleTimeout,

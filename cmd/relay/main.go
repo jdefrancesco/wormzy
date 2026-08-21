@@ -18,6 +18,8 @@ func main() {
 	listen := flag.String("listen", ":3478", "UDP listen address for the QUIC relay")
 	redisURL := flag.String("redis", defaultTelemetryRedisURL(), "redis URL for operator telemetry and controls")
 	prefix := flag.String("prefix", "wormzy", "redis key prefix")
+	pairIdle := flag.Duration("pair-idle", 5*time.Minute, "maximum paired time without relayed application data")
+	pairLifetime := flag.Duration("pair-lifetime", 12*time.Hour, "absolute maximum lifetime of one relay pair")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -43,7 +45,12 @@ func main() {
 		telemetry.Run(ctx, 5*time.Second)
 	}()
 
-	server := &transport.RelayServer{Addr: *listen, Telemetry: telemetry}
+	server := &transport.RelayServer{
+		Addr:            *listen,
+		Telemetry:       telemetry,
+		PairIdleTimeout: *pairIdle,
+		PairLifetime:    *pairLifetime,
+	}
 	err = server.ListenAndServe(ctx)
 	stopping := ctx.Err() != nil
 	stop()

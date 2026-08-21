@@ -18,14 +18,14 @@ PACKAGES := $(shell $(GOCMD) list ./... | grep -v "/mvp$$")
 GOSEC_DIRS := $(shell $(GOCMD) list -f '{{.Dir}}' ./... | grep -v "/mvp$$")
 
 DEFAULT_BINARY=$(BIN_DIR)/wormzy
-BINARIES := wormzy rendezvous stuncheck mailbox dashboard relay
+BINARIES := wormzy stuncheck mailbox dashboard relay
 
 all: test build 
 
 deploy: install install-units
 	-@sudo systemctl daemon-reload
+	-@sudo systemctl disable --now wormzy-rendezvous.service
 	-@sudo systemctl restart wormzy-mailbox.service
-	-@sudo systemctl restart wormzy-rendezvous.service
 	-@sudo systemctl restart wormzy-relay.service
 	-@sudo systemctl --no-pager --full status wormzy-mailbox.service wormzy-relay.service
 
@@ -34,9 +34,9 @@ debug:
 	$(GOBUILD) -ldflags "$(BUILD_LDFLAGS)" -o $(DEFAULT_BINARY) -gcflags "all=-N -l" -v ./cmd/wormzy
 
 build:
-# 	gosec -exclude=G104,G307 $(GOSEC_DIRS)
+	gosec -exclude=G104,G307 $(GOSEC_DIRS)
 	@mkdir -p $(BIN_DIR)
-	@for bin in $(BINARIES); do \
+	@set -e; for bin in $(BINARIES); do \
 		$(GOBUILD) -ldflags "$(BUILD_LDFLAGS)" -o $(BIN_DIR)/$$bin -v ./cmd/$$bin ; \
 	done
 
@@ -44,6 +44,11 @@ build:
 wormzy:
 	@mkdir -p $(BIN_DIR)
 	$(GOBUILD) -ldflags "$(BUILD_LDFLAGS)" -o $(BIN_DIR)/wormzy -v ./cmd/wormzy
+
+.PHONY: legacy-rendezvous
+legacy-rendezvous:
+	@mkdir -p $(BIN_DIR)
+	$(GOBUILD) -ldflags "$(BUILD_LDFLAGS)" -o $(BIN_DIR)/rendezvous -v ./cmd/rendezvous
 
 test:
 	$(GOTEST) -timeout $(TEST_TIMEOUT) -v $(PACKAGES)
@@ -65,7 +70,7 @@ test-all: test-core test-transport test-stun
 
 .PHONY: install
 install: build
-	@for bin in $(BINARIES); do \
+	@set -e; for bin in $(BINARIES); do \
 		tmp="/usr/local/bin/.$$bin.tmp" ; \
 		sudo cp ./$(BIN_DIR)/$$bin "$$tmp" && sudo chmod 0755 "$$tmp" && sudo mv "$$tmp" /usr/local/bin/$$bin ; \
 	done

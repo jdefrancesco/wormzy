@@ -42,6 +42,10 @@ Verify the installed release:
 wormzy version
 ```
 
+For automation that needs to preselect a strong code, run `wormzy code` and
+pass its single-line output to `wormzy send --code`. Hand-constructed codes may
+have far less entropy even when they match the required format.
+
 Go installs the binary into `GOBIN` when configured, or into
 `$(go env GOPATH)/bin` otherwise. Ensure that directory is on your `PATH` if
 the shell cannot find `wormzy` after installation.
@@ -50,8 +54,11 @@ On the sender:
 
 ```bash
 wormzy send ./big.bin
-# displays a pairing code such as f7p9-x2
+# displays a newly generated pairing code
 ```
+
+Wormzy transfers one file per session. Archive or compress a directory before
+sending it; the CLI rejects directory paths before starting network setup.
 
 On the receiver (on another terminal/machine):
 
@@ -99,7 +106,11 @@ and `BUILD_DATE` when invoking `make build`.
 
 ## Deploying updated binaries
 
-On a server with the `systemd` units installed, run `make deploy`. It builds the binaries, installs them to `/usr/local/bin`, reloads systemd, and restarts `wormzy-mailbox`, `wormzy-rendezvous`, and `wormzy-relay` (ignored if those services are absent).
+On a server with the `systemd` units installed, run `make deploy`. It builds the
+binaries, installs them to `/usr/local/bin`, reloads systemd, restarts
+`wormzy-mailbox` and `wormzy-relay`, and disables the obsolete
+`wormzy-rendezvous` service if it is present. Current clients use the bounded v2
+HTTPS mailbox; do not expose the legacy TCP rendezvous service on port 9999.
 
 Run the operator console anywhere that has privileged access to the production Redis instance:
 
@@ -111,7 +122,32 @@ It displays mailbox and relay heartbeats, current server load, relay bytes, unre
 
 ## Endpoint defaults
 
-The CLI ships with a baked-in mailbox/rendezvous endpoint (`https://relay.wormzy.io`). You don’t need to set anything for basic use. To override, pass `-relay ...` or set `WORMZY_RELAY_URL`. A config file at `$XDG_CONFIG_HOME/wormzy/relay` or `/etc/wormzy/relay` is also honored. Wormzy also tries temporary UDP UPnP port mapping by default; pass `--no-upnp` or set `WORMZY_UPNP=0` to disable it.
+The CLI ships with the official mailbox/rendezvous endpoint (`https://relay.wormzy.io`). You don’t need to set anything for basic use. To override it, pass `--relay ...` or set `WORMZY_RELAY_URL`. A config file at `$XDG_CONFIG_HOME/wormzy/relay` or `/etc/wormzy/relay` is also honored. Wormzy also tries temporary UDP UPnP port mapping by default; pass `--no-upnp` or set `WORMZY_UPNP=0` to disable it.
+
+Custom remote mailbox URLs must use HTTPS. Plain HTTP is accepted only for
+loopback development endpoints. Direct Redis mailbox connections are likewise
+restricted to loopback addresses or local Unix sockets for development; remote
+clients must use the HTTPS mailbox API.
+
+The pairing secret is generated locally; current clients send the mailbox only
+an opaque session identifier and per-role capability proof. File contents stay
+end-to-end encrypted even on the fallback relay. A custom mailbox/relay can
+still observe connection metadata (such as IP addresses, timing, and transfer
+activity), delay or suppress pairing messages, or deny service. Only configure
+an endpoint whose operator you trust with that metadata, and use Wormzy-
+generated codes rather than hand-constructed ones.
+
+For a custom HTTPS mailbox, `--relay-pin` can add a certificate public-key
+pin. Its value is standard padded base64 of
+`SHA-256(RawSubjectPublicKeyInfo)`. Pinning supplements normal certificate-chain
+and hostname verification; it does not replace either check. Wormzy rejects a
+pin used with HTTP, Redis, or another non-HTTPS endpoint. Plan pin updates when
+the endpoint's TLS key rotates, and obtain the pin through a trusted channel.
+
+UPnP discovery is restricted to a responding device on the same private
+subnet, with DNS, redirects, proxies, and cross-host control URLs disabled.
+SSDP still relies on the local network not spoofing router responses; use
+`--no-upnp` on an untrusted LAN.
 
 Wormzy transport paths are:
 - direct: UDP/QUIC NAT punching, including STUN and temporary UPnP candidates (preferred)

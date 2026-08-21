@@ -15,6 +15,7 @@ and alternate UPnP on/off in a balanced order.
 Plan options:
   --trials-per-arm N   Trials with UPnP on and off (default: 10)
   --output FILE        Plan CSV to create (required)
+  --wormzy PATH        Wormzy binary used to generate codes (default: ./bin/wormzy)
   --force              Replace an existing plan
 
 Run options:
@@ -59,17 +60,19 @@ require_value() {
 }
 
 generate_code() {
-  local raw
-  raw="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
-  if [[ ${#raw} -ne 16 ]]; then
+  local wormzy_bin="$1"
+  local code
+  code="$("$wormzy_bin" code)"
+  if [[ ! "$code" =~ ^[a-z2-7]{4}(-[a-z2-7]{4}){4}$ ]]; then
     die "could not generate a trial code"
   fi
-  printf "upnp-ab-%s" "$raw"
+  printf "%s" "$code"
 }
 
 plan_command() {
   local trials_per_arm=10
   local output=""
+  local wormzy_bin="./bin/wormzy"
   local force=0
 
   while [[ $# -gt 0 ]]; do
@@ -82,6 +85,11 @@ plan_command() {
       --output)
         require_value "$@"
         output="$2"
+        shift 2
+        ;;
+      --wormzy)
+        require_value "$@"
+        wormzy_bin="$2"
         shift 2
         ;;
       --force)
@@ -101,6 +109,7 @@ plan_command() {
   [[ "$trials_per_arm" =~ ^[0-9]+$ ]] && [[ "$trials_per_arm" -gt 0 ]] ||
     die "--trials-per-arm must be a positive integer"
   [[ -n "$output" ]] || die "--output is required"
+  [[ -x "$wormzy_bin" ]] || die "wormzy binary is not executable: $wormzy_bin"
   if [[ -e "$output" && "$force" -ne 1 ]]; then
     die "plan already exists: $output (pass --force to replace it)"
   fi
@@ -111,13 +120,13 @@ plan_command() {
   for ((pair = 1; pair <= trials_per_arm; pair++)); do
     if ((pair % 2 == 1)); then
       for arm in on off; do
-        code="$(generate_code)"
+        code="$(generate_code "$wormzy_bin")"
         printf "%03d,%s,%s\n" "$trial" "$arm" "$code" >> "$output"
         trial=$((trial + 1))
       done
     else
       for arm in off on; do
-        code="$(generate_code)"
+        code="$(generate_code "$wormzy_bin")"
         printf "%03d,%s,%s\n" "$trial" "$arm" "$code" >> "$output"
         trial=$((trial + 1))
       done

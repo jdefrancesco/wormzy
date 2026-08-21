@@ -15,17 +15,22 @@ import (
 )
 
 type redisMailbox struct {
-	client *redis.Client
-	code   string
-	ttl    time.Duration
-	prefix string
-	role   string
-	stop   func()
+	client         *redis.Client
+	code           string
+	ttl            time.Duration
+	prefix         string
+	role           string
+	capability     string
+	capabilityHash string
+	stop           func()
 
 	store *sessionStore
 }
 
 func newRedisMailbox(ctx context.Context, addr string, ttl time.Duration, role string) (*redisMailbox, error) {
+	if err := validateMailboxRole(role); err != nil {
+		return nil, err
+	}
 	opts, err := redis.ParseURL(addr)
 	if err != nil {
 		opts = &redis.Options{Addr: addr}
@@ -45,13 +50,22 @@ func newRedisMailbox(ctx context.Context, addr string, ttl time.Duration, role s
 }
 
 func newRedisMailboxWithClient(client *redis.Client, ttl time.Duration, role string, stop func()) (*redisMailbox, error) {
+	if err := validateMailboxRole(role); err != nil {
+		return nil, err
+	}
+	capability, capabilityHash, err := generateMailboxCapability(nil)
+	if err != nil {
+		return nil, err
+	}
 	return &redisMailbox{
-		client: client,
-		ttl:    ttl,
-		prefix: "wormzy",
-		role:   role,
-		stop:   stop,
-		store:  newSessionStore(client, ttl, "wormzy"),
+		client:         client,
+		ttl:            ttl,
+		prefix:         "wormzy",
+		role:           role,
+		capability:     capability,
+		capabilityHash: capabilityHash,
+		stop:           stop,
+		store:          newSessionStore(client, ttl, mailboxV2StorePrefix),
 	}, nil
 }
 
@@ -82,6 +96,9 @@ func useEmbeddedByDefault(addr string, opts *redis.Options) bool {
 }
 
 func startEmbeddedMailbox(ttl time.Duration, role string) (*redisMailbox, error) {
+	if err := validateMailboxRole(role); err != nil {
+		return nil, err
+	}
 	mini, err := miniredis.Run()
 	if err != nil {
 		return nil, fmt.Errorf("embedded redis unavailable: %w", err)
@@ -91,6 +108,12 @@ func startEmbeddedMailbox(ttl time.Duration, role string) (*redisMailbox, error)
 }
 
 func (m *redisMailbox) Claim(ctx context.Context, requested string) (string, error) {
+	if err := validateMailboxRole(m.role); err != nil {
+		return "", err
+	}
+	if !validMailboxSessionID(requested) {
+		return "", errMailboxUnavailable
+	}
 	if m.role == "send" {
 		control, err := readOperatorControl(ctx, m.client, m.prefix)
 		if err != nil {
@@ -99,48 +122,56 @@ func (m *redisMailbox) Claim(ctx context.Context, requested string) (string, err
 		if control.Draining {
 			return "", errServiceDraining
 		}
-		code := requested
-		for {
-			if code == "" {
-				code = rendezvous.GenerateCode()
-			}
-			_, err := m.store.registerSender(ctx, code)
-			if err == nil {
-				m.code = code
-				return code, nil
-			}
-			if !errors.Is(err, errSenderInUse) || requested != "" {
-				return "", err
-			}
-			code = ""
+		if _, err := m.store.registerSender(ctx, requested, m.capabilityHash); err != nil {
+			return "", err
 		}
+		m.code = requested
+		return requested, nil
 	}
 
-	if requested == "" {
-		return "", fmt.Errorf("receiver requires a pairing code")
+	for {
+		if _, err := m.store.registerReceiver(ctx, requested, m.capabilityHash); err == nil {
+			m.code = requested
+			return requested, nil
+		} else if !errors.Is(err, errMailboxUnavailable) {
+			return "", err
+		}
+		timer := time.NewTimer(mailboxPollRetryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return "", ctx.Err()
+		case <-timer.C:
+		}
 	}
-	if _, err := m.store.registerReceiver(ctx, requested); err != nil {
-		return "", err
-	}
-	m.code = requested
-	return requested, nil
 }
 
 func (m *redisMailbox) StoreSelf(ctx context.Context, info rendezvous.SelfInfo) error {
+	if err := validateMailboxRole(m.role); err != nil {
+		return err
+	}
 	if m.code == "" {
 		return fmt.Errorf("mailbox code not set")
 	}
-	return m.store.updatePeerInfo(ctx, m.code, m.role, info)
+	return m.store.updatePeerInfo(ctx, m.code, m.role, m.capabilityHash, info)
 }
 
 func (m *redisMailbox) WaitPeer(ctx context.Context) (*rendezvous.SelfInfo, error) {
+	if err := validateMailboxRole(m.role); err != nil {
+		return nil, err
+	}
 	if m.code == "" {
 		return nil, fmt.Errorf("mailbox code not set")
 	}
-	return m.store.waitForPeer(ctx, m.code, m.role)
+	return m.store.waitForPeer(ctx, m.code, m.role, m.capabilityHash)
 }
 
 func (m *redisMailbox) Send(ctx context.Context, typ string, body any) error {
+	if err := validateMailboxRole(m.role); err != nil {
+		return err
+	}
 	if m.code == "" {
 		return fmt.Errorf("mailbox code not set")
 	}
@@ -150,27 +181,36 @@ func (m *redisMailbox) Send(ctx context.Context, typ string, body any) error {
 	}
 	msg := mailboxMessage{Type: typ, Body: raw}
 	dest := oppositeRole(m.role)
-	return m.store.enqueue(ctx, m.code, dest, msg)
+	return m.store.enqueue(ctx, m.code, m.role, dest, m.capabilityHash, msg)
 }
 
 func (m *redisMailbox) Receive(ctx context.Context) (mailboxMessage, error) {
+	if err := validateMailboxRole(m.role); err != nil {
+		return mailboxMessage{}, err
+	}
 	if m.code == "" {
 		return mailboxMessage{}, fmt.Errorf("mailbox code not set")
 	}
-	return m.store.dequeue(ctx, m.code, m.role)
+	return m.store.dequeue(ctx, m.code, m.role, m.capabilityHash)
 }
 
 func (m *redisMailbox) ReportStats(ctx context.Context, stats transferStats) error {
+	if err := validateMailboxRole(m.role); err != nil {
+		return err
+	}
 	if m.code == "" {
 		return fmt.Errorf("mailbox code not set")
 	}
 	if stats.Mode == "" {
 		stats.Mode = m.role
 	}
-	return m.store.recordStats(ctx, m.code, stats)
+	return m.store.recordStats(ctx, m.code, m.role, m.capabilityHash, stats)
 }
 
 func (m *redisMailbox) Cleanup(ctx context.Context) {
+	if validateMailboxRole(m.role) != nil {
+		return
+	}
 	if m.code == "" {
 		return
 	}

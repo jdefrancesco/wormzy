@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	cpace "filippo.io/cpace"
 	"github.com/flynn/noise"
@@ -41,18 +42,21 @@ import (
 )
 
 const (
-	alpn = "p2p-wormzy-1"
+	alpn = "p2p-wormzy-2"
 	// defaultRelay is the baked-in rendezvous/mailbox endpoint. Users can override
 	// via CLI flag or environment (WORMZY_RELAY_URL / WORMZY_RELAY).
-	defaultRelay          = "https://relay.wormzy.io"
-	defaultRelayUDPPort   = 3478
-	defaultHandshakeTO    = 90 * time.Second
-	defaultTransferIdleTO = 5 * time.Minute
-	relayFallbackDelay    = 4 * time.Second
-	relayRetryDelay       = 3 * time.Second
-	relayAttemptTimeout   = 6 * time.Second
-	statsReportTimeout    = 5 * time.Second
-	quicFinishTimeout     = 3 * time.Second
+	defaultRelay              = "https://relay.wormzy.io"
+	defaultRelayUDPPort       = 3478
+	defaultHandshakeTO        = 90 * time.Second
+	defaultTransferIdleTO     = 5 * time.Minute
+	relayFallbackDelay        = 4 * time.Second
+	relayRetryDelay           = 3 * time.Second
+	relayAttemptTimeout       = 6 * time.Second
+	statsReportTimeout        = 5 * time.Second
+	mailboxLeaseInterval      = 2 * time.Minute
+	mailboxLeaseRequestTO     = 10 * time.Second
+	peerConfirmationNonceSize = 32
+	peerConfirmationPreface   = "wormzy-peer-confirm-v2"
 
 	// Wire-format sizing limits.
 	maxUint16PayloadLen = (1 << 16) - 1
@@ -61,7 +65,17 @@ const (
 	fileHeaderNameLenSize = 2
 	fileHeaderSizeSize    = 8
 	fileHeaderFixedLen    = fileHeaderNameLenSize + fileHeaderSizeSize
+	fileHashAlgorithm     = "blake3-256"
+	fileDigestSize        = 32
+
+	// Encrypted frames carry either a file header, one file chunk, or the small
+	// integrity trailer. The header is the largest legal plaintext because its
+	// filename length is encoded as a uint16.
+	maxAEADPlaintextSize  = fileHeaderFixedLen + maxUint16PayloadLen
+	maxAEADCiphertextSize = maxAEADPlaintextSize + chacha20poly1305.Overhead
 )
+
+var errPeerKeyConfirmation = errors.New("peer key confirmation failed")
 
 // Config controls how a Wormzy transfer session behaves.
 type Config struct {
@@ -91,11 +105,6 @@ type Result struct {
 	FileHash  string
 	Transport string
 	Candidate string
-}
-
-type directTarget struct {
-	cand rendezvous.Candidate
-	addr *net.UDPAddr
 }
 
 // Reporter receives human-readable log lines describing progress.
@@ -135,10 +144,9 @@ func (f ReporterFunc) Logf(format string, args ...interface{}) {
 
 func (f ReporterFunc) Stage(stage Stage, state StageState, detail string) {}
 
-// Run executes a full rendezvous + NAT punching flow for the configured mode.
-// It performs STUN discovery, rendezvous via the mailbox, Noise+QUIC handshake,
-// and then streams the file either as sender or receiver. The returned Result
-// includes session metadata and transfer stats.
+// Run executes a full rendezvous and NAT traversal flow for the configured mode.
+// It claims the pairing code before discovery, tries direct ICE, then falls back
+// through legacy direct candidates and the relay before streaming the file.
 func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr error) {
 	reporter := rep
 	if reporter == nil {
@@ -149,6 +157,27 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		return nil, err
 	}
 	started := time.Now()
+	reporter.Stage(StageRendezvous, StageStateRunning, "dialing relay")
+	mbox, err := newMailbox(ctx, cfg)
+	if err != nil {
+		reporter.Stage(StageRendezvous, StageStateError, err.Error())
+		return nil, err
+	}
+	mbox = newProtocolMailbox(mbox)
+	defer mbox.Close()
+
+	claimCtx, cancelClaim := context.WithTimeout(ctx, cfg.HandshakeTimeout)
+	code, err := claimPairingCode(claimCtx, cfg, reporter, mbox)
+	cancelClaim()
+	if err != nil {
+		reporter.Stage(StageRendezvous, StageStateError, err.Error())
+		return nil, err
+	}
+	stats := transferStats{Mode: cfg.Mode}
+	var sessionCleanup func()
+	defer func() {
+		finalizeTransfer(mbox, stats, res, finalErr, started, sessionCleanup, reporter)
+	}()
 
 	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
@@ -158,8 +187,13 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 	reporter.Logf("udp/listen %s", udpConn.LocalAddr())
 
 	self := rendezvous.SelfInfo{
-		Local:    localEndpoint(udpConn),
-		Features: []string{featureICEv1},
+		Local: localEndpoint(udpConn),
+		Features: []string{
+			featureICEv1,
+			featureProgressiveUPnPV1,
+			featureTransferCompletionV1,
+			featureAuthenticatedSignalingV1,
+		},
 	}
 	if cfg.Loopback {
 		if addr, ok := udpConn.LocalAddr().(*net.UDPAddr); ok {
@@ -190,40 +224,19 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 			self.Public = self.Local
 		}
 	}
-	upnpMapping, err := setupUPnPMapping(ctx, cfg, udpConn, self.Public, reporter)
-	if err != nil {
-		reporter.Logf("continuing without UPnP")
-	}
-	if upnpMapping != nil {
-		defer func() {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), defaultUPnPCleanupTimeout)
-			defer cancel()
-			if err := upnpMapping.Close(cleanupCtx); err != nil {
-				reporter.Logf("upnp/cleanup failed: %v", err)
-			} else {
-				reporter.Logf("upnp/cleanup external=%s", upnpMapping.externalAddr)
-			}
-		}()
-	}
-	upnpAddr := ""
-	if upnpMapping != nil {
-		upnpAddr = upnpMapping.externalAddr
-	}
-	self.Candidates = buildCandidates(self, cfg.Loopback, upnpAddr, cfg.relayCandidateAddr())
+	self.Candidates = buildCandidates(self, cfg.Loopback, "", cfg.relayCandidateAddr())
 	reporter.Logf("candidates/self %s", formatCandidateList(self.Candidates))
 
-	mbox, err := newMailbox(ctx, cfg)
-	if err != nil {
-		finalErr = err
-		return nil, err
-	}
-	defer mbox.Close()
-
-	reporter.Stage(StageRendezvous, StageStateRunning, "dialing relay")
-	peer, code, psk, err := rendezvousExchange(ctx, cfg, self, reporter, mbox)
+	pairingCtx, cancelPairing := context.WithTimeout(ctx, cfg.HandshakeTimeout)
+	peer, psk, err := completeRendezvousExchange(pairingCtx, cfg, self, reporter, mbox, code)
+	cancelPairing()
 	if err != nil {
 		reporter.Stage(StageRendezvous, StageStateError, err.Error())
 		finalErr = err
+		return nil, err
+	}
+	if err := requirePeerTransferCompletion(peer); err != nil {
+		reporter.Stage(StageRendezvous, StageStateError, err.Error())
 		return nil, err
 	}
 	directCandidates, relayCand, err := selectPeerCandidates(self, peer, cfg.Loopback)
@@ -245,532 +258,100 @@ func Run(ctx context.Context, cfg Config, rep Reporter) (res *Result, finalErr e
 		reporter.Stage(StageRendezvous, StageStateError, "no usable transport candidates")
 		return nil, fmt.Errorf("no usable transport candidates")
 	}
-	reporter.Logf("paired with code %s", code)
+	reporter.Logf("paired with authenticated peer")
 
 	initialCandidate := pickFallbackDirectCandidate(directCandidates)
 	if relayCand != nil && len(directCandidates) == 0 {
 		initialCandidate = *relayCand
 	}
-	stats := transferStats{
-		Mode:      cfg.Mode,
-		Candidate: initialCandidate.Type,
-		Transport: transportLabelForCandidate(initialCandidate),
-	}
-	var sessionCleanup func()
-	defer func() {
-		finalizeTransfer(mbox, stats, res, finalErr, started, sessionCleanup, reporter)
-	}()
+	stats.Candidate = initialCandidate.Type
+	stats.Transport = transportLabelForCandidate(initialCandidate)
+	pathSelection := prepareProgressivePath(
+		ctx,
+		cfg,
+		mbox,
+		reporter,
+		udpConn,
+		self,
+		peer,
+		directCandidates,
+		relayCand,
+		code,
+		psk,
+	)
+	defer pathSelection.cleanup(reporter)
+	peer = pathSelection.peer
+	directCandidates = pathSelection.directCandidates
+	relayCand = pathSelection.relayCandidate
 
-	if !cfg.Loopback {
-		reporter.Stage(StageQUIC, StageStateRunning, "ice connectivity checks")
-		iceSession, iceErr := attemptICEQUICSession(ctx, cfg, mbox, reporter, peer)
-		switch {
-		case iceErr == nil && iceSession != nil:
-			sessionCleanup = iceSession.cleanup
-			stats.Candidate = iceSession.candidate.Type
-			stats.Transport = transportLabelForCandidate(iceSession.candidate)
-			stats.DirectOutcome = "won"
-			stats.DirectSummary = fmt.Sprintf("%s@%s=won", iceSession.candidate.Type, iceSession.candidate.Addr)
-			reporter.Logf("direct race outcome=%s details=%s", stats.DirectOutcome, stats.DirectSummary)
-			if iceSession.initiated {
-				reporter.Logf("dialed QUIC peer via ICE %s", iceSession.candidate.Addr)
-				reporter.Stage(StageQUIC, StageStateDone, iceSession.candidate.Addr)
-			} else {
-				reporter.Logf("accepted QUIC connection via ICE from %s", iceSession.conn.RemoteAddr())
-				reporter.Stage(StageQUIC, StageStateDone, iceSession.conn.RemoteAddr().String())
-			}
-
-			reporter.Stage(StageNoise, StageStateRunning, "noise handshake")
-			fileKey, sas, err := runNoiseOverQUIC(iceSession.conn, iceSession.initiated, psk)
-			if err != nil {
-				if stats.Transport == "p2p" {
-					stats.DirectOutcome = "noise-failed"
-				}
-				reporter.Stage(StageNoise, StageStateError, err.Error())
-				return nil, err
-			}
-			reporter.Logf("noise handshake SAS %s", sas)
-			reporter.Stage(StageNoise, StageStateDone, fmt.Sprintf("confirm SAS %s", sas))
-
-			res = &Result{Code: code, Peer: peer, Mode: cfg.Mode}
-			res.Transport = stats.Transport
-			res.Candidate = stats.Candidate
-
-			switch cfg.Mode {
-			case "send":
-				reporter.Stage(StageTransfer, StageStateRunning, "streaming file")
-				sum, size, err := sendFileEncrypted(iceSession.conn, cfg.FilePath, fileKey, cfg.IdleTimeout, reporter)
-				if err != nil {
-					reporter.Stage(StageTransfer, StageStateError, err.Error())
-					return nil, err
-				}
-				res.FilePath = cfg.FilePath
-				res.FileSize = size
-				res.FileHash = hex.EncodeToString(sum)
-				reporter.Logf("transfer complete")
-				reporter.Stage(StageTransfer, StageStateDone, "file sent")
-			case "recv":
-				reporter.Stage(StageTransfer, StageStateRunning, "receiving file")
-				path, sum, size, err := receiveFile(iceSession.conn, fileKey, cfg.DownloadDir, cfg.IdleTimeout, reporter)
-				if err != nil {
-					reporter.Stage(StageTransfer, StageStateError, err.Error())
-					return nil, err
-				}
-				res.FilePath = path
-				res.FileSize = size
-				res.FileHash = hex.EncodeToString(sum)
-				reporter.Logf("saved file to %s", path)
-				reporter.Stage(StageTransfer, StageStateDone, path)
-			}
-
-			finishCtx, cancelFinish := context.WithTimeout(context.Background(), quicFinishTimeout)
-			finishQUICConnection(finishCtx, iceSession.conn, cfg.Mode)
-			cancelFinish()
-
-			return res, nil
-		case errors.Is(iceErr, errICESkipped):
-			reporter.Logf("ice/skipped peer does not advertise %s", featureICEv1)
-		case iceErr != nil:
-			reporter.Logf("ice/failed %v (continuing legacy punch path)", iceErr)
-		}
-	}
-
-	var directTargets []directTarget
-	for _, cand := range directCandidates {
-		peerUDP, err := net.ResolveUDPAddr("udp4", cand.Addr)
-		if err != nil {
-			reporter.Logf("direct candidate %s (%s) resolve failed: %v", cand.Addr, cand.Type, err)
-			continue
-		}
-		directTargets = append(directTargets, directTarget{cand: cand, addr: peerUDP})
-	}
-	if len(directTargets) > 0 {
-		reporter.Logf("direct/targets %s", formatDirectTargets(directTargets))
-	}
-	if relayCand != nil {
-		reporter.Logf("relay/candidate %s (%s)", relayCand.Addr, relayCand.Type)
-	}
-	if len(directTargets) == 0 && relayCand == nil {
-		return nil, fmt.Errorf("peer did not advertise any dialable UDP candidates")
-	}
-
-	punchCtx, cancelPunch := context.WithCancel(ctx)
-	defer cancelPunch()
-	stopPunch := make(chan struct{})
-	var punchWG sync.WaitGroup
-	if len(directTargets) > 0 {
-		punchTargets := make([]*net.UDPAddr, 0, len(directTargets))
-		for _, target := range directTargets {
-			punchTargets = append(punchTargets, target.addr)
-		}
-		punchWG.Add(1)
-		go func() {
-			defer punchWG.Done()
-			punchLoop(punchCtx, udpConn, punchTargets, stopPunch, reporter)
-		}()
-	}
-
-	quicTransport := &quic.Transport{Conn: udpConn}
-	serverTLS, err := selfSignedTLS()
-	if err != nil {
-		return nil, err
-	}
-	serverTLS.NextProtos = []string{alpn}
-	clientTLS := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{alpn}}
-	quicConf := &quic.Config{
-		KeepAlivePeriod:      15 * time.Second,
-		MaxIdleTimeout:       cfg.IdleTimeout,
-		HandshakeIdleTimeout: cfg.HandshakeTimeout,
-	}
-
-	reporter.Stage(StageQUIC, StageStateRunning, "punching + dialing")
-	ln, err := quicTransport.Listen(serverTLS, quicConf)
-	if err != nil {
-		return nil, err
-	}
-	defer ln.Close()
-
-	type quicResult struct {
-		conn      *quic.Conn
-		initiated bool
-		candidate *rendezvous.Candidate
-		attempt   int
-		err       error
-	}
-	type relayResult struct {
-		conn      *quic.Conn
-		transport *quic.Transport
-		err       error
-	}
-	resCh := make(chan quicResult, len(directTargets)*2+2)
-	relayResCh := make(chan relayResult, 1)
-	ctxConn, cancelConn := context.WithTimeout(ctx, cfg.HandshakeTimeout)
-	defer cancelConn()
-
-	// Accept path
-	go func() {
-		reporter.Logf("direct/accept waiting on %s", udpConn.LocalAddr())
-		conn, err := ln.Accept(ctxConn)
-		resCh <- quicResult{conn: conn, initiated: false, attempt: 0, err: err}
-	}()
-
-	launchDial := func(target directTarget, delay time.Duration, attempt int) {
-		go func() {
-			reporter.Logf("direct/dial-schedule target=%s type=%s attempt=%d delay=%s", target.addr.String(), target.cand.Type, attempt, delay)
-			if delay > 0 {
-				timer := time.NewTimer(delay)
-				select {
-				case <-ctxConn.Done():
-					timer.Stop()
-					reporter.Logf("direct/dial-cancel target=%s type=%s attempt=%d", target.addr.String(), target.cand.Type, attempt)
-					return
-				case <-timer.C:
-				}
-			}
-			reporter.Logf("direct/dial-start target=%s type=%s attempt=%d", target.addr.String(), target.cand.Type, attempt)
-			conn, err := quicTransport.Dial(ctxConn, target.addr, clientTLS, quicConf)
-			cand := target.cand
-			resCh <- quicResult{conn: conn, initiated: true, candidate: &cand, attempt: attempt, err: err}
-		}()
-	}
-	if len(directTargets) > 0 {
-		baseDelay := time.Duration(0)
-		if cfg.Mode == "send" {
-			baseDelay = 200 * time.Millisecond
-		}
-		reporter.Logf("starting direct race with %d candidate(s)", len(directTargets))
-		for i, target := range directTargets {
-			launchDial(target, baseDelay+time.Duration(i)*120*time.Millisecond, 1)
-		}
-		for i, target := range directTargets {
-			launchDial(target, baseDelay+700*time.Millisecond+time.Duration(i)*120*time.Millisecond, 2)
-		}
-		for i, target := range directTargets {
-			launchDial(target, baseDelay+1500*time.Millisecond+time.Duration(i)*120*time.Millisecond, 3)
-		}
-	}
-
-	dialableCandidates := make([]rendezvous.Candidate, 0, len(directTargets))
-	for _, target := range directTargets {
-		dialableCandidates = append(dialableCandidates, target.cand)
-	}
-
-	var quicConn *quic.Conn
-	initiated := cfg.Mode == "recv"
-	preferInitiated := cfg.Mode == "recv" // recv prefers dial, send prefers accept
-	preferredPath := "accept"
-	if preferInitiated {
-		preferredPath = "dial"
-	}
-	pathKind := func(v bool) string {
-		if v {
-			return "dial"
-		}
-		return "accept"
-	}
-	usedCandidate := pickFallbackDirectCandidate(dialableCandidates)
-	var firstErr error
-	relayInFlight := false
-	relayAttempts := 0
-	directOutcome := "pending"
-	directStatus := make(map[string]string, len(directTargets))
-	for _, target := range directTargets {
-		directStatus[target.cand.Type+"@"+target.cand.Addr] = "pending"
-	}
-	var relayTransport *quic.Transport
-	fallbackDelay := relayFallbackDelay
-	if len(directTargets) == 0 && relayCand != nil {
-		fallbackDelay = 0
-		directOutcome = "no-response"
-	}
-	const nonPreferredGrace = 650 * time.Millisecond
-	var provisional *quicResult
-	var provisionalTimer *time.Timer
-	var provisionalTimerCh <-chan time.Time
-	var relayTimer *time.Timer
-	var relayTimerCh <-chan time.Time
-	stopProvisionalTimer := func() {
-		if provisionalTimer == nil {
-			return
-		}
-		if !provisionalTimer.Stop() {
-			select {
-			case <-provisionalTimer.C:
-			default:
-			}
-		}
-		provisionalTimer = nil
-		provisionalTimerCh = nil
-	}
-	stopRelayTimer := func() {
-		if relayTimer == nil {
-			return
-		}
-		if !relayTimer.Stop() {
-			select {
-			case <-relayTimer.C:
-			default:
-			}
-		}
-		relayTimer = nil
-		relayTimerCh = nil
-	}
-	scheduleRelayAttempt := func(delay time.Duration) {
-		if relayCand == nil {
-			return
-		}
-		if relayTimer == nil {
-			relayTimer = time.NewTimer(delay)
-		} else {
-			if !relayTimer.Stop() {
-				select {
-				case <-relayTimer.C:
-				default:
-				}
-			}
-			relayTimer.Reset(delay)
-		}
-		relayTimerCh = relayTimer.C
-	}
-	defer stopRelayTimer()
-	closeDirectConn := func(conn *quic.Conn, reason string) {
-		if conn == nil {
-			return
-		}
-		_ = conn.CloseWithError(0, reason)
-	}
-	adoptDirect := func(res quicResult) {
-		quicConn = res.conn
-		initiated = res.initiated
-		if res.initiated && res.candidate != nil {
-			usedCandidate = *res.candidate
-			key := usedCandidate.Type + "@" + usedCandidate.Addr
-			directStatus[key] = "won"
-			directOutcome = "won"
-			reporter.Logf("direct race won on %s (%s) attempt=%d", usedCandidate.Addr, usedCandidate.Type, res.attempt)
-			return
-		}
-		matched := classifyCandidateByRemote(res.conn.RemoteAddr(), dialableCandidates)
-		if matched != nil {
-			usedCandidate = *matched
-			key := matched.Type + "@" + matched.Addr
-			directStatus[key] = "won"
-		}
-		directOutcome = "won"
-		reporter.Logf("direct race accepted from %s", res.conn.RemoteAddr())
-	}
-	if relayCand != nil {
-		reporter.Logf("relay/fallback armed delay=%s", fallbackDelay)
-		scheduleRelayAttempt(fallbackDelay)
-	} else {
-		reporter.Logf("relay/fallback unavailable (no relay candidate)")
-	}
-
-	// Sloppy NAT punching p2p-race logic goes here. If we miserably fail fallback and just use relay.
-waitLoop:
-	for quicConn == nil {
-		select {
-		case res := <-resCh:
-			if res.err == nil && res.conn != nil {
-				// To avoid split-brain (both peers choosing their own dialed conn),
-				// prefer a deterministic path by role and only fall back to the first
-				// non-preferred success after a short grace window.
-				if res.initiated == preferInitiated {
-					stopProvisionalTimer()
-					if provisional != nil && provisional.conn != nil && provisional.conn != res.conn {
-						closeDirectConn(provisional.conn, "preferred direct path selected")
-					}
-					provisional = nil
-					adoptDirect(res)
-					break waitLoop
-				}
-				if provisional == nil {
-					prov := res
-					provisional = &prov
-					provisionalTimer = time.NewTimer(nonPreferredGrace)
-					provisionalTimerCh = provisionalTimer.C
-					reporter.Logf(
-						"direct race provisional path=%s waiting=%s for preferred=%s",
-						pathKind(res.initiated),
-						nonPreferredGrace,
-						preferredPath,
-					)
-					continue
-				}
-				// Extra success while waiting on preferred path; close it.
-				closeDirectConn(res.conn, "alternate direct path discarded")
-				reporter.Logf("direct race extra %s path discarded", pathKind(res.initiated))
-				continue
-			}
-			if res.candidate != nil {
-				key := res.candidate.Type + "@" + res.candidate.Addr
-				outcome := classifyDialError(res.err)
-				directStatus[key] = outcome
-				reporter.Logf("direct race failed on %s (%s) attempt=%d outcome=%s err=%v", res.candidate.Addr, res.candidate.Type, res.attempt, outcome, res.err)
-			}
-			if firstErr == nil {
-				firstErr = res.err
-			}
-		case <-provisionalTimerCh:
-			stopProvisionalTimer()
-			if provisional != nil {
-				reporter.Logf(
-					"direct race selecting provisional path=%s after waiting %s for preferred=%s",
-					pathKind(provisional.initiated),
-					nonPreferredGrace,
-					preferredPath,
-				)
-				adoptDirect(*provisional)
-				provisional = nil
-				break waitLoop
-			}
-		case <-relayTimerCh:
-			if relayCand == nil {
-				relayTimerCh = nil
-				continue
-			}
-			if relayInFlight {
-				scheduleRelayAttempt(relayRetryDelay)
-				continue
-			}
-			relayAttempts++
-			if directOutcome == "pending" {
-				directOutcome = "quic-timeout"
-			}
-			if relayAttempts == 1 {
-				reporter.Logf("falling back to relay %s", relayCand.Addr)
-				reporter.Stage(StageQUIC, StageStateRunning, "relay fallback")
-			} else {
-				reporter.Logf("retrying relay fallback attempt=%d %s", relayAttempts, relayCand.Addr)
-			}
-			relayInFlight = true
-			scheduleRelayAttempt(relayRetryDelay)
-			go func() {
-				attemptCtx, cancel := context.WithTimeout(ctxConn, relayAttemptTimeout)
-				defer cancel()
-				rConn, rTransport, err := dialRelay(attemptCtx, relayCand.Addr, cfg)
-				if err != nil {
-					relayResCh <- relayResult{err: err}
-					return
-				}
-				if err := registerRelay(attemptCtx, rConn, code, cfg.Mode, psk); err != nil {
-					_ = rConn.CloseWithError(0, err.Error())
-					relayResCh <- relayResult{err: err}
-					return
-				}
-				relayResCh <- relayResult{conn: rConn, transport: rTransport}
-			}()
-		case relay := <-relayResCh:
-			relayInFlight = false
-			if relay.err == nil && relay.conn != nil {
-				stopRelayTimer()
-				stopProvisionalTimer()
-				if provisional != nil {
-					closeDirectConn(provisional.conn, "relay fallback selected")
-					provisional = nil
-				}
-				quicConn = relay.conn
-				relayTransport = relay.transport
-				initiated = cfg.Mode == "send"
-				usedCandidate = *relayCand
-				if len(directTargets) == 0 {
-					directOutcome = "no-response"
-				}
-				break waitLoop
-			}
-			reporter.Logf("relay fallback attempt %d failed: %v", relayAttempts, relay.err)
-			if firstErr == nil {
-				firstErr = relay.err
-			}
-		case <-ctxConn.Done():
-			if provisional != nil && provisional.conn != nil {
-				stopProvisionalTimer()
-				reporter.Logf(
-					"direct race selecting provisional path=%s because preferred=%s did not arrive in time",
-					pathKind(provisional.initiated),
-					preferredPath,
-				)
-				adoptDirect(*provisional)
-				provisional = nil
-				break waitLoop
-			}
-			if quicConn != nil {
-				break waitLoop
-			}
-			if relayInFlight {
-				relay := <-relayResCh
-				relayInFlight = false
-				if relay.err == nil && relay.conn != nil {
-					quicConn = relay.conn
-					relayTransport = relay.transport
-					initiated = cfg.Mode == "send"
-					usedCandidate = *relayCand
-					break waitLoop
-				}
-				if firstErr == nil {
-					firstErr = relay.err
-				}
-			}
-			if directOutcome == "pending" {
-				if len(directTargets) == 0 {
-					directOutcome = "no-response"
-				} else {
-					directOutcome = "quic-timeout"
-				}
-			}
-			if firstErr == nil {
-				firstErr = ctxConn.Err()
-			}
-			reporter.Stage(StageQUIC, StageStateError, firstErr.Error())
-			return nil, firstErr
-		}
-	}
-	cancelConn()
-
-	if quicConn == nil {
-		err := firstErr
-		if err == nil {
-			err = fmt.Errorf("failed to establish QUIC")
-		}
-		reporter.Stage(StageQUIC, StageStateError, err.Error())
-		return nil, err
-	}
-
-	stats.Candidate = usedCandidate.Type
-	stats.Transport = transportLabelForCandidate(usedCandidate)
-	if directOutcome == "pending" {
-		if usedCandidate.Type == "relay" {
-			directOutcome = "quic-timeout"
-		} else {
-			directOutcome = "won"
-		}
-	}
-	stats.DirectOutcome = directOutcome
-	stats.DirectSummary = summarizeDirectRace(directStatus)
-	if stats.DirectSummary != "" {
+	if iceSession := pathSelection.iceSession; iceSession != nil {
+		sessionCleanup = iceSession.cleanup
+		stats.Candidate = iceSession.candidate.Type
+		stats.Transport = transportLabelForCandidate(iceSession.candidate)
+		stats.DirectOutcome = "won"
+		stats.DirectSummary = fmt.Sprintf("%s@%s=won", iceSession.candidate.Type, iceSession.candidate.Addr)
 		reporter.Logf("direct race outcome=%s details=%s", stats.DirectOutcome, stats.DirectSummary)
-	} else {
-		reporter.Logf("direct race outcome=%s", stats.DirectOutcome)
+		if iceSession.initiated {
+			reporter.Logf("dialed QUIC peer via ICE %s", iceSession.candidate.Addr)
+			reporter.Stage(StageQUIC, StageStateDone, iceSession.candidate.Addr)
+		} else {
+			reporter.Logf("accepted QUIC connection via ICE from %s", iceSession.conn.RemoteAddr())
+			reporter.Stage(StageQUIC, StageStateDone, iceSession.conn.RemoteAddr().String())
+		}
+
+		return transferEstablishedQUICSession(
+			ctx, cfg, reporter, iceSession.conn, iceSession.initiated,
+			false, mbox, self, peer, code, psk, &stats,
+		)
 	}
 
-	close(stopPunch)
-	punchWG.Wait()
-	if relayTransport != nil && relayTransport.Conn != nil {
-		defer relayTransport.Conn.Close()
+	legacyPath, err := establishLegacyQUICPath(ctx, cfg, reporter, udpConn, directCandidates, relayCand, psk)
+	if err != nil {
+		return nil, err
 	}
+	defer legacyPath.cleanup()
+	stats.Candidate = legacyPath.candidate.Type
+	stats.Transport = transportLabelForCandidate(legacyPath.candidate)
+	stats.DirectOutcome = legacyPath.directOutcome
+	stats.DirectSummary = legacyPath.directSummary
 
-	if usedCandidate.Type == "relay" {
-		reporter.Stage(StageQUIC, StageStateDone, "relay fallback")
-	} else if initiated {
-		reporter.Logf("dialed QUIC peer %s", usedCandidate.Addr)
-		reporter.Stage(StageQUIC, StageStateDone, usedCandidate.Addr)
-	} else {
-		reporter.Logf("accepted QUIC connection from %s", quicConn.RemoteAddr())
-		reporter.Stage(StageQUIC, StageStateDone, quicConn.RemoteAddr().String())
-	}
+	return transferEstablishedQUICSession(
+		ctx, cfg, reporter, legacyPath.conn, legacyPath.initiated, true,
+		mbox, self, peer, code, psk, &stats,
+	)
+
+}
+
+// transferEstablishedQUICSession runs the shared authenticated Noise, file,
+// integrity, and completion pipeline over a selected QUIC connection.
+func transferEstablishedQUICSession(
+	ctx context.Context,
+	cfg Config,
+	reporter Reporter,
+	conn *quic.Conn,
+	initiated bool,
+	peerConfirmed bool,
+	mbox mailbox,
+	self rendezvous.SelfInfo,
+	peer rendezvous.SelfInfo,
+	code string,
+	psk []byte,
+	stats *transferStats,
+) (*Result, error) {
+	stopLease := startMailboxLease(ctx, mbox, self, mailboxLeaseInterval, reporter)
+	defer stopLease()
 
 	reporter.Stage(StageNoise, StageStateRunning, "noise handshake")
-	fileKey, sas, err := runNoiseOverQUIC(quicConn, initiated, psk)
+	var (
+		fileKey []byte
+		sas     string
+		err     error
+	)
+	if peerConfirmed {
+		fileKey, sas, err = runNoiseOverConfirmedQUIC(ctx, conn, initiated, psk, cfg.HandshakeTimeout)
+	} else {
+		fileKey, sas, err = runNoiseOverQUIC(ctx, conn, initiated, psk, cfg.HandshakeTimeout)
+	}
 	if err != nil {
 		if stats.Transport == "p2p" {
 			stats.DirectOutcome = "noise-failed"
@@ -781,14 +362,22 @@ waitLoop:
 	reporter.Logf("noise handshake SAS %s", sas)
 	reporter.Stage(StageNoise, StageStateDone, fmt.Sprintf("confirm SAS %s", sas))
 
-	res = &Result{Code: code, Peer: peer, Mode: cfg.Mode}
-	res.Transport = stats.Transport
-	res.Candidate = stats.Candidate
+	res := &Result{
+		Code:      code,
+		Peer:      peer,
+		Mode:      cfg.Mode,
+		Transport: stats.Transport,
+		Candidate: stats.Candidate,
+	}
+	var (
+		transferDigest    []byte
+		transferDoneLabel string
+	)
 
 	switch cfg.Mode {
 	case "send":
 		reporter.Stage(StageTransfer, StageStateRunning, "streaming file")
-		sum, size, err := sendFileEncrypted(quicConn, cfg.FilePath, fileKey, cfg.IdleTimeout, reporter)
+		sum, size, err := sendFileEncrypted(ctx, conn, cfg.FilePath, fileKey, cfg.IdleTimeout, reporter)
 		if err != nil {
 			reporter.Stage(StageTransfer, StageStateError, err.Error())
 			return nil, err
@@ -796,11 +385,12 @@ waitLoop:
 		res.FilePath = cfg.FilePath
 		res.FileSize = size
 		res.FileHash = hex.EncodeToString(sum)
-		reporter.Logf("transfer complete")
-		reporter.Stage(StageTransfer, StageStateDone, "file sent")
+		transferDigest = sum
+		transferDoneLabel = "file sent"
+		reporter.Logf("file stream sent; awaiting authenticated receipt")
 	case "recv":
 		reporter.Stage(StageTransfer, StageStateRunning, "receiving file")
-		path, sum, size, err := receiveFile(quicConn, fileKey, cfg.DownloadDir, cfg.IdleTimeout, reporter)
+		path, sum, size, err := receiveFile(ctx, conn, fileKey, cfg.DownloadDir, cfg.IdleTimeout, reporter)
 		if err != nil {
 			reporter.Stage(StageTransfer, StageStateError, err.Error())
 			return nil, err
@@ -808,13 +398,63 @@ waitLoop:
 		res.FilePath = path
 		res.FileSize = size
 		res.FileHash = hex.EncodeToString(sum)
+		transferDigest = sum
+		transferDoneLabel = path
 		reporter.Logf("saved file to %s", path)
-		reporter.Stage(StageTransfer, StageStateDone, path)
 	}
 
+	if err := finishTransferSession(ctx, cfg, peer, conn, code, fileKey, transferDigest, res.FileSize, reporter); err != nil {
+		reporter.Stage(StageTransfer, StageStateError, err.Error())
+		return nil, err
+	}
+	reporter.Logf("transfer complete")
+	reporter.Stage(StageTransfer, StageStateDone, transferDoneLabel)
 	return res, nil
 }
 
+// startMailboxLease refreshes authenticated session state while file bytes are
+// in flight so a healthy long transfer retains its final telemetry slot.
+func startMailboxLease(
+	ctx context.Context,
+	mbox mailbox,
+	self rendezvous.SelfInfo,
+	interval time.Duration,
+	reporter Reporter,
+) func() {
+	if mbox == nil || interval <= 0 {
+		return func() {}
+	}
+	leaseCtx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-leaseCtx.Done():
+				return
+			case <-ticker.C:
+				refreshCtx, cancelRefresh := context.WithTimeout(leaseCtx, mailboxLeaseRequestTO)
+				err := mbox.StoreSelf(refreshCtx, self)
+				cancelRefresh()
+				if err != nil && leaseCtx.Err() == nil && reporter != nil {
+					reporter.Logf("mailbox/lease refresh failed: %v", err)
+				}
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cancel()
+			wg.Wait()
+		})
+	}
+}
+
+// finalizeTransfer reports privacy-safe outcome telemetry before releasing transport resources.
 func finalizeTransfer(
 	mbox mailbox,
 	stats transferStats,
@@ -827,7 +467,7 @@ func finalizeTransfer(
 	if mbox != nil {
 		stats.Completed = finalErr == nil
 		if finalErr != nil {
-			stats.Error = finalErr.Error()
+			stats.Error = reportedFailureCategory(finalErr)
 		}
 		stats.DurationMillis = time.Since(started).Milliseconds()
 		if res != nil {
@@ -883,8 +523,20 @@ func (cfg Config) validate() error {
 	if cfg.Mode != "send" && cfg.Mode != "recv" {
 		return fmt.Errorf("mode must be send or recv")
 	}
-	if cfg.Mode == "send" && cfg.FilePath == "" {
-		return fmt.Errorf("send mode requires a file path")
+	if cfg.Mode == "send" {
+		if cfg.FilePath == "" {
+			return fmt.Errorf("send mode requires a file path")
+		}
+		info, err := os.Stat(cfg.FilePath)
+		if err != nil {
+			return fmt.Errorf("cannot access %q: %w", cfg.FilePath, err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("cannot send directory %q; archive or compress it first, then send the resulting file", cfg.FilePath)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("cannot send %q because it is not a regular file", cfg.FilePath)
+		}
 	}
 	return nil
 }
@@ -897,7 +549,7 @@ func (cfg Config) stunServers() []string {
 		list = append([]string{}, cfg.STUNServers...)
 	}
 	src := mrand.NewSource(time.Now().UnixNano())
-	r := mrand.New(src)
+	r := mrand.New(src) // #nosec G404 -- shuffling public STUN endpoints is not security-sensitive.
 	r.Shuffle(len(list), func(i, j int) { list[i], list[j] = list[j], list[i] })
 	return list
 }
@@ -953,30 +605,35 @@ func (cfg Config) relayCandidateAddr() string {
 	return net.JoinHostPort(cfg.RelayAddr, strconv.Itoa(defaultRelayUDPPort))
 }
 
-// rendezvousExchange coordinates code assignment, PAKE, and peer discovery over the mailbox.
-func rendezvousExchange(ctx context.Context, cfg Config, me rendezvous.SelfInfo, rep Reporter, mb mailbox) (peer rendezvous.SelfInfo, assigned string, psk []byte, err error) {
-	code, err := mb.Claim(ctx, cfg.Code)
-	if err != nil {
-		return peer, assigned, nil, friendlyRendezvousErr(err)
-	}
-	assigned = code
-	rep.Stage(StageRendezvous, StageStateRunning, "code "+assigned)
-	rep.Logf("rendezvous assigned code %s", assigned)
-
+// completeRendezvousExchange publishes candidates, runs PAKE, and waits for the peer after code assignment.
+func completeRendezvousExchange(
+	ctx context.Context,
+	cfg Config,
+	me rendezvous.SelfInfo,
+	rep Reporter,
+	mb mailbox,
+	assigned string,
+) (peer rendezvous.SelfInfo, psk []byte, err error) {
 	if err := mb.StoreSelf(ctx, me); err != nil {
-		return peer, assigned, nil, friendlyRendezvousErr(err)
+		return peer, nil, friendlyRendezvousErr(err)
 	}
 
 	psk, err = runPAKEOverMailbox(ctx, mb, cfg.Mode, assigned, "send", "recv")
 	if err != nil {
-		return peer, assigned, nil, friendlyRendezvousErr(err)
+		return peer, nil, friendlyRendezvousErr(err)
 	}
 
 	peerInfo, err := mb.WaitPeer(ctx)
 	if err != nil {
-		return peer, assigned, nil, friendlyRendezvousErr(err)
+		return peer, nil, friendlyRendezvousErr(err)
 	}
-	return *peerInfo, assigned, psk, nil
+	if err := authenticatePeerSnapshot(ctx, mb, assigned, cfg.Mode, psk, me, *peerInfo); err != nil {
+		return peer, nil, friendlyRendezvousErr(err)
+	}
+	if rep != nil {
+		rep.Logf("rendezvous peer metadata authenticated")
+	}
+	return *peerInfo, psk, nil
 }
 
 // runPAKEOverMailbox executes CPace over mailbox messages to derive a shared key.
@@ -1053,28 +710,171 @@ func friendlyRendezvousErr(err error) error {
 	}
 }
 
-// runNoiseOverQUIC performs the Noise NN handshake over a QUIC stream and returns
-// the derived file key plus a short authentication string for human verification.
-func runNoiseOverQUIC(conn *quic.Conn, initiator bool, psk []byte) ([]byte, string, error) {
+// confirmPeerPSK performs replay-resistant mutual proof of the PAKE key before
+// either side begins the Noise handshake or opens a file stream.
+func confirmPeerPSK(stream io.ReadWriter, initiator bool, psk []byte, random io.Reader) error {
+	if len(psk) != sha256.Size {
+		return fmt.Errorf("%w: invalid key", errPeerKeyConfirmation)
+	}
+	if random == nil {
+		random = crand.Reader
+	}
+
+	challenge := make([]byte, peerConfirmationNonceSize)
+	initiatorNonce := make([]byte, peerConfirmationNonceSize)
+	if initiator {
+		if err := writeAll(stream, []byte(peerConfirmationPreface)); err != nil {
+			return fmt.Errorf("write peer confirmation preface: %w", err)
+		}
+		if _, err := io.ReadFull(stream, challenge); err != nil {
+			return fmt.Errorf("read peer confirmation challenge: %w", err)
+		}
+		if _, err := io.ReadFull(random, initiatorNonce); err != nil {
+			return fmt.Errorf("generate peer confirmation nonce: %w", err)
+		}
+		proof := peerConfirmationMAC(psk, "initiator", challenge, initiatorNonce)
+		if err := writeAll(stream, append(initiatorNonce, proof...)); err != nil {
+			return fmt.Errorf("write peer confirmation proof: %w", err)
+		}
+		response := make([]byte, sha256.Size)
+		if _, err := io.ReadFull(stream, response); err != nil {
+			return fmt.Errorf("read peer confirmation response: %w", err)
+		}
+		want := peerConfirmationMAC(psk, "responder", challenge, initiatorNonce)
+		if !hmac.Equal(response, want) {
+			return errPeerKeyConfirmation
+		}
+		return nil
+	}
+
+	preface := make([]byte, len(peerConfirmationPreface))
+	if _, err := io.ReadFull(stream, preface); err != nil {
+		return fmt.Errorf("read peer confirmation preface: %w", err)
+	}
+	if !hmac.Equal(preface, []byte(peerConfirmationPreface)) {
+		return fmt.Errorf("%w: protocol preface", errPeerKeyConfirmation)
+	}
+	if _, err := io.ReadFull(random, challenge); err != nil {
+		return fmt.Errorf("generate peer confirmation challenge: %w", err)
+	}
+	if err := writeAll(stream, challenge); err != nil {
+		return fmt.Errorf("write peer confirmation challenge: %w", err)
+	}
+	proofFrame := make([]byte, peerConfirmationNonceSize+sha256.Size)
+	if _, err := io.ReadFull(stream, proofFrame); err != nil {
+		return fmt.Errorf("read peer confirmation proof: %w", err)
+	}
+	copy(initiatorNonce, proofFrame[:peerConfirmationNonceSize])
+	want := peerConfirmationMAC(psk, "initiator", challenge, initiatorNonce)
+	if !hmac.Equal(proofFrame[peerConfirmationNonceSize:], want) {
+		return errPeerKeyConfirmation
+	}
+	response := peerConfirmationMAC(psk, "responder", challenge, initiatorNonce)
+	if err := writeAll(stream, response); err != nil {
+		return fmt.Errorf("write peer confirmation response: %w", err)
+	}
+	return nil
+}
+
+// peerConfirmationMAC computes one length-delimited proof for the pre-Noise
+// PAKE key-confirmation exchange.
+func peerConfirmationMAC(psk []byte, role string, fields ...[]byte) []byte {
+	mac := hmac.New(sha256.New, psk)
+	allFields := make([][]byte, 0, len(fields)+2)
+	allFields = append(allFields, []byte("wormzy-quic-peer-confirmation-v2"), []byte(role))
+	allFields = append(allFields, fields...)
+	var length [4]byte
+	for _, field := range allFields {
+		binary.BigEndian.PutUint32(length[:], uint32(len(field))) // #nosec G115 -- bounded protocol fields.
+		_, _ = mac.Write(length[:])
+		_, _ = mac.Write(field)
+	}
+	return mac.Sum(nil)
+}
+
+// peerConfirmationTimeout bounds how long an unauthenticated QUIC path can occupy a race worker.
+func peerConfirmationTimeout(handshakeTimeout time.Duration) time.Duration {
+	return boundedDuration(handshakeTimeout/10, 2*time.Second, 5*time.Second)
+}
+
+// confirmQUICPeer proves PAKE-key possession before a candidate may win a connection race.
+func confirmQUICPeer(ctx context.Context, conn *quic.Conn, initiator bool, psk []byte) error {
 	var stream *quic.Stream
 	var err error
-	ctx := context.Background()
 	if initiator {
 		stream, err = conn.OpenStreamSync(ctx)
 	} else {
 		stream, err = conn.AcceptStream(ctx)
 	}
 	if err != nil {
+		return fmt.Errorf("%w: %v", errPeerKeyConfirmation, err)
+	}
+	defer stream.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := stream.SetDeadline(deadline); err != nil {
+			return fmt.Errorf("%w: %v", errPeerKeyConfirmation, err)
+		}
+	}
+	stopCancel := context.AfterFunc(ctx, func() {
+		stream.CancelRead(0)
+		stream.CancelWrite(0)
+	})
+	defer stopCancel()
+	if err := confirmPeerPSK(stream, initiator, psk, crand.Reader); err != nil {
+		return fmt.Errorf("%w: %v", errPeerKeyConfirmation, err)
+	}
+	return nil
+}
+
+// runNoiseOverQUIC authenticates the selected QUIC peer, performs the Noise NN
+// handshake, and returns the derived file key plus a human-verifiable SAS.
+func runNoiseOverQUIC(ctx context.Context, conn *quic.Conn, initiator bool, psk []byte, timeout time.Duration) ([]byte, string, error) {
+	if timeout <= 0 {
+		timeout = defaultHandshakeTO
+	}
+	authCtx, cancelAuth := context.WithTimeout(ctx, peerConfirmationTimeout(timeout))
+	defer cancelAuth()
+	if err := confirmQUICPeer(authCtx, conn, initiator, psk); err != nil {
+		return nil, "", err
+	}
+	return runNoiseOverConfirmedQUIC(ctx, conn, initiator, psk, timeout)
+}
+
+// runNoiseOverConfirmedQUIC performs Noise after the selected QUIC connection has proved the PAKE key.
+func runNoiseOverConfirmedQUIC(ctx context.Context, conn *quic.Conn, initiator bool, psk []byte, timeout time.Duration) ([]byte, string, error) {
+	if timeout <= 0 {
+		timeout = defaultHandshakeTO
+	}
+	handshakeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var stream *quic.Stream
+	var err error
+	if initiator {
+		stream, err = conn.OpenStreamSync(handshakeCtx)
+	} else {
+		stream, err = conn.AcceptStream(handshakeCtx)
+	}
+	if err != nil {
 		return nil, "", err
 	}
 	defer stream.Close()
-
+	if deadline, ok := handshakeCtx.Deadline(); ok {
+		if err := stream.SetDeadline(deadline); err != nil {
+			return nil, "", err
+		}
+	}
+	stopCancel := context.AfterFunc(handshakeCtx, func() {
+		stream.CancelRead(0)
+		stream.CancelWrite(0)
+	})
+	defer stopCancel()
 	suite := noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, noise.HashBLAKE2s)
 	hs, err := noise.NewHandshakeState(noise.Config{
 		Pattern:     noise.HandshakeNN,
 		Initiator:   initiator,
 		CipherSuite: suite,
-		Prologue:    []byte("wormzy-noise-v1"),
+		Prologue:    []byte("wormzy-noise-v2"),
 		Random:      crand.Reader,
 	})
 	if err != nil {
@@ -1086,12 +886,11 @@ func runNoiseOverQUIC(conn *quic.Conn, initiator bool, psk []byte) ([]byte, stri
 			return fmt.Errorf("noise frame too large")
 		}
 		var hdr [2]byte
-		binary.BigEndian.PutUint16(hdr[:], uint16(len(b)))
-		if _, err := stream.Write(hdr[:]); err != nil {
+		binary.BigEndian.PutUint16(hdr[:], uint16(len(b))) // #nosec G115 -- length is bounded by maxUint16PayloadLen above.
+		if err := writeAll(stream, hdr[:]); err != nil {
 			return err
 		}
-		_, err := stream.Write(b)
-		return err
+		return writeAll(stream, b)
 	}
 	readFrame := func() ([]byte, error) {
 		var ln uint16
@@ -1184,15 +983,18 @@ type fileMetadata struct {
 func makeNonce(base [24]byte, ctr uint64) []byte {
 	b := base
 	for i := 0; i < 8; i++ {
-		b[23-i] ^= byte(ctr >> (8 * i))
+		b[23-i] ^= byte(ctr >> (8 * i)) // #nosec G115 -- extracting one intentional low byte per iteration.
 	}
 	return b[:]
 }
 
 func (w *aeadWriter) WriteChunk(p []byte) error {
+	if len(p) > maxAEADPlaintextSize {
+		return fmt.Errorf("encrypted frame plaintext exceeds %d bytes", maxAEADPlaintextSize)
+	}
 	n := makeNonce(w.baseNonce, w.ctr)
 	ct := w.aead.Seal(nil, n, p, nil)
-	if err := binary.Write(w.w, binary.BigEndian, uint32(len(ct))); err != nil {
+	if err := binary.Write(w.w, binary.BigEndian, uint32(len(ct))); err != nil { // #nosec G115 -- plaintext and AEAD overhead are bounded above.
 		return err
 	}
 	if _, err := w.w.Write(ct); err != nil {
@@ -1206,6 +1008,9 @@ func (r *aeadReader) ReadChunk() ([]byte, error) {
 	var ln uint32
 	if err := binary.Read(r.r, binary.BigEndian, &ln); err != nil {
 		return nil, err
+	}
+	if ln < chacha20poly1305.Overhead || ln > maxAEADCiphertextSize {
+		return nil, fmt.Errorf("invalid encrypted frame size %d", ln)
 	}
 	ct := make([]byte, ln)
 	if _, err := io.ReadFull(r.r, ct); err != nil {
@@ -1222,7 +1027,7 @@ func (r *aeadReader) ReadChunk() ([]byte, error) {
 
 // sendFileEncrypted streams a file over QUIC with per-chunk XChaCha20-Poly1305
 // encryption, enforcing idle timeouts and reporting progress.
-func sendFileEncrypted(conn *quic.Conn, path string, key []byte, idle time.Duration, rep Reporter) ([]byte, int64, error) {
+func sendFileEncrypted(ctx context.Context, conn *quic.Conn, path string, key []byte, idle time.Duration, rep Reporter) ([]byte, int64, error) {
 	if idle <= 0 {
 		idle = defaultTransferIdleTO
 	}
@@ -1238,18 +1043,36 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, idle time.Durat
 		return nil, 0, fmt.Errorf("filename too long")
 	}
 	size := fi.Size()
+	if size < 0 {
+		return nil, 0, errors.New("file has an invalid negative size")
+	}
+	wireSize := uint64(size) // #nosec G115 -- negative sizes are rejected above.
 
-	file, err := os.Open(path)
+	file, err := os.Open(path) // #nosec G304 -- path is the user-selected file being sent.
 	if err != nil {
 		return nil, 0, err
 	}
 	defer file.Close()
 
-	us, err := conn.OpenUniStreamSync(context.Background())
+	streamCtx, cancel := context.WithTimeout(ctx, idle)
+	defer cancel()
+	us, err := conn.OpenUniStreamSync(streamCtx)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer us.Close()
+	stopCancel := context.AfterFunc(ctx, func() {
+		us.CancelWrite(0)
+	})
+	defer stopCancel()
+	setWriteDeadline := func() {
+		_ = us.SetWriteDeadline(time.Now().Add(idle))
+	}
+	clearDeadline := func() {
+		_ = us.SetWriteDeadline(time.Time{})
+	}
+	setWriteDeadline()
+	defer clearDeadline()
 
 	aead, err := chacha20poly1305.NewX(key)
 	if err != nil {
@@ -1263,18 +1086,10 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, idle time.Durat
 		return nil, 0, err
 	}
 	writer := &aeadWriter{w: us, aead: aead, baseNonce: base}
-	setWriteDeadline := func() {
-		_ = us.SetWriteDeadline(time.Now().Add(idle))
-	}
-	clearDeadline := func() {
-		_ = us.SetWriteDeadline(time.Time{})
-	}
-	setWriteDeadline()
-	defer clearDeadline()
 
 	header := make([]byte, fileHeaderFixedLen+len(name))
-	binary.LittleEndian.PutUint16(header[0:fileHeaderNameLenSize], uint16(len(name)))
-	binary.LittleEndian.PutUint64(header[fileHeaderNameLenSize:fileHeaderFixedLen], uint64(size))
+	binary.LittleEndian.PutUint16(header[0:fileHeaderNameLenSize], uint16(len(name))) // #nosec G115 -- name length is bounded above.
+	binary.LittleEndian.PutUint64(header[fileHeaderNameLenSize:fileHeaderFixedLen], wireSize)
 	copy(header[fileHeaderFixedLen:], []byte(name))
 	if err := writer.WriteChunk(header); err != nil {
 		return nil, 0, err
@@ -1286,6 +1101,9 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, idle time.Durat
 	lastPct := -1
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
 		n, er := file.Read(buf)
 		if n > 0 {
 			if _, err := hasher.Write(buf[:n]); err != nil {
@@ -1308,9 +1126,9 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, idle time.Durat
 	// Ensure we report 100% once data is flushed.
 	reportTransferProgress(rep, "Sending", size, size, &lastPct)
 	meta := fileMetadata{
-		Hash:      "blake3-256",
+		Hash:      fileHashAlgorithm,
 		ChunkSize: uint32(chunkSize),
-		Size:      uint64(size),
+		Size:      wireSize,
 		Digest:    hasher.Sum(nil),
 	}
 	payload, err := json.Marshal(meta)
@@ -1325,15 +1143,29 @@ func sendFileEncrypted(conn *quic.Conn, path string, key []byte, idle time.Durat
 
 // receiveFile pulls the encrypted stream, writes it to disk with collision-safe
 // naming, verifies the metadata trailer, and reports progress.
-func receiveFile(conn *quic.Conn, key []byte, downloadDir string, idle time.Duration, rep Reporter) (string, []byte, int64, error) {
+func receiveFile(ctx context.Context, conn *quic.Conn, key []byte, downloadDir string, idle time.Duration, rep Reporter) (string, []byte, int64, error) {
 	if idle <= 0 {
 		idle = defaultTransferIdleTO
 	}
-	stream, err := conn.AcceptUniStream(context.Background())
+	streamCtx, cancel := context.WithTimeout(ctx, idle)
+	defer cancel()
+	stream, err := conn.AcceptUniStream(streamCtx)
 	if err != nil {
 		return "", nil, 0, err
 	}
 	defer stream.CancelRead(0)
+	stopCancel := context.AfterFunc(ctx, func() {
+		stream.CancelRead(0)
+	})
+	defer stopCancel()
+	setReadDeadline := func() {
+		_ = stream.SetReadDeadline(time.Now().Add(idle))
+	}
+	clearReadDeadline := func() {
+		_ = stream.SetReadDeadline(time.Time{})
+	}
+	setReadDeadline()
+	defer clearReadDeadline()
 
 	var base [24]byte
 	if _, err := io.ReadFull(stream, base[:]); err != nil {
@@ -1344,14 +1176,6 @@ func receiveFile(conn *quic.Conn, key []byte, downloadDir string, idle time.Dura
 		return "", nil, 0, err
 	}
 	reader := &aeadReader{r: stream, aead: aead, baseNonce: base}
-	setReadDeadline := func() {
-		_ = stream.SetReadDeadline(time.Now().Add(idle))
-	}
-	clearReadDeadline := func() {
-		_ = stream.SetReadDeadline(time.Time{})
-	}
-	setReadDeadline()
-	defer clearReadDeadline()
 
 	hdr, err := reader.ReadChunk()
 	if err != nil {
@@ -1377,25 +1201,30 @@ func receiveFile(conn *quic.Conn, key []byte, downloadDir string, idle time.Dura
 	if err := ensureFreeSpace(targetDir, size); err != nil {
 		return "", nil, 0, err
 	}
-	outPath, renamed, err := pickDownloadPath(targetDir, name)
+	out, outPath, renamed, err := createDownloadFile(targetDir, name)
 	if err != nil {
 		return "", nil, 0, err
 	}
+	keepDownload := false
+	defer func() {
+		if keepDownload {
+			return
+		}
+		_ = out.Close()
+		_ = os.Remove(outPath)
+	}()
 	if renamed && rep != nil {
 		rep.Logf("target %s exists; saving as %s", filepath.Join(targetDir, name), outPath)
 	}
-
-	out, err := os.Create(outPath)
-	if err != nil {
-		return "", nil, 0, err
-	}
-	defer out.Close()
 
 	hasher := blake3.New()
 	var written uint64
 	lastPct := -1
 
-	for {
+	for written < size {
+		if err := ctx.Err(); err != nil {
+			return "", nil, 0, err
+		}
 		setReadDeadline()
 		chunk, err := reader.ReadChunk()
 		if err == io.EOF {
@@ -1403,6 +1232,13 @@ func receiveFile(conn *quic.Conn, key []byte, downloadDir string, idle time.Dura
 		}
 		if err != nil {
 			return "", nil, 0, err
+		}
+		if len(chunk) == 0 {
+			return "", nil, 0, errors.New("received an empty file-data chunk")
+		}
+		remaining := size - written
+		if uint64(len(chunk)) > remaining {
+			return "", nil, 0, fmt.Errorf("received data exceeds advertised file size")
 		}
 		if _, err := hasher.Write(chunk); err != nil {
 			return "", nil, 0, err
@@ -1412,9 +1248,6 @@ func receiveFile(conn *quic.Conn, key []byte, downloadDir string, idle time.Dura
 		}
 		written += uint64(len(chunk))
 		reportTransferProgress(rep, "Receiving", clampInt64(written), clampInt64(size), &lastPct)
-		if written >= size {
-			break
-		}
 	}
 	reportTransferProgress(rep, "Receiving", clampInt64(size), clampInt64(size), &lastPct)
 	if written != size {
@@ -1423,58 +1256,78 @@ func receiveFile(conn *quic.Conn, key []byte, downloadDir string, idle time.Dura
 
 	setReadDeadline()
 	sum := hasher.Sum(nil)
-	if err := verifyMetadata(reader, sum); err != nil {
+	if err := verifyMetadata(reader, sum, size, uint32(chunkSize)); err != nil {
 		return "", nil, 0, err
 	}
+	if err := out.Close(); err != nil {
+		return "", nil, 0, err
+	}
+	keepDownload = true
 	return outPath, sum, clampInt64(size), nil
 }
 
+// sanitizeFilename removes path separators and terminal-control characters from peer metadata.
 func sanitizeFilename(s string) string {
-	s = strings.ReplaceAll(s, "/", "_")
-	s = strings.ReplaceAll(s, "\\", "_")
-	return s
+	var sanitized strings.Builder
+	sanitized.Grow(len(s))
+	for _, char := range s {
+		if char == '/' || char == '\\' || unicode.IsControl(char) || unicode.In(char, unicode.Cf) {
+			sanitized.WriteByte('_')
+			continue
+		}
+		sanitized.WriteRune(char)
+	}
+	name := sanitized.String()
+	if name == "." || name == ".." {
+		return "wormzy-file"
+	}
+	return name
 }
 
-func pickDownloadPath(dir, filename string) (string, bool, error) {
-	base := filepath.Join(dir, filename)
-	exists, err := pathExists(base)
+// createDownloadFile atomically reserves a collision-safe path beneath dir.
+func createDownloadFile(dir, filename string) (*os.File, string, bool, error) {
+	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return "", false, err
+		return nil, "", false, err
 	}
-	if !exists {
-		return base, false, nil
+	defer root.Close()
+
+	openCandidate := func(candidate string) (*os.File, error) {
+		return root.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	}
+	if file, err := openCandidate(filename); err == nil {
+		return file, filepath.Join(dir, filename), false, nil
+	} else if !errors.Is(err, fs.ErrExist) {
+		return nil, "", false, err
 	}
 
 	ext := filepath.Ext(filename)
 	stem := strings.TrimSuffix(filename, ext)
 	for i := 1; i <= 99; i++ {
-		candidate := filepath.Join(dir, fmt.Sprintf("%s (wormzy-%d)%s", stem, i, ext))
-		exists, err := pathExists(candidate)
-		if err != nil {
-			return "", false, err
+		candidate := fmt.Sprintf("%s (wormzy-%d)%s", stem, i, ext)
+		file, err := openCandidate(candidate)
+		if err == nil {
+			return file, filepath.Join(dir, candidate), true, nil
 		}
-		if !exists {
-			return candidate, true, nil
+		if !errors.Is(err, fs.ErrExist) {
+			return nil, "", false, err
 		}
 	}
-	var randBuf [4]byte
-	if _, err := crand.Read(randBuf[:]); err == nil {
-		candidate := filepath.Join(dir, fmt.Sprintf("%s-%s%s", stem, hex.EncodeToString(randBuf[:]), ext))
-		return candidate, true, nil
+	for i := 0; i < 16; i++ {
+		var random [4]byte
+		if _, err := crand.Read(random[:]); err != nil {
+			return nil, "", false, err
+		}
+		candidate := fmt.Sprintf("%s-%s%s", stem, hex.EncodeToString(random[:]), ext)
+		file, err := openCandidate(candidate)
+		if err == nil {
+			return file, filepath.Join(dir, candidate), true, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return nil, "", false, err
+		}
 	}
-	return "", false, fmt.Errorf("unable to find free destination for %s", filename)
-}
-
-func pathExists(p string) (bool, error) {
-	_, err := os.Stat(p)
-	switch {
-	case err == nil:
-		return true, nil
-	case errors.Is(err, fs.ErrNotExist):
-		return false, nil
-	default:
-		return false, err
-	}
+	return nil, "", false, fmt.Errorf("unable to reserve destination for %s", filename)
 }
 
 func localEndpoint(conn *net.UDPConn) string {
@@ -1723,13 +1576,15 @@ func punchLoop(ctx context.Context, conn *net.UDPConn, peers []*net.UDPAddr, sto
 	}
 }
 
-func verifyMetadata(reader *aeadReader, digest []byte) error {
+// verifyMetadata requires one complete metadata trailer followed immediately
+// by EOF and verifies it against the received transfer.
+func verifyMetadata(reader *aeadReader, digest []byte, expectedSize uint64, expectedChunkSize uint32) error {
 	chunk, err := reader.ReadChunk()
-	switch {
-	case err == io.EOF:
-		return nil
-	case err != nil:
-		return err
+	if errors.Is(err, io.EOF) {
+		return errors.New("missing file metadata trailer")
+	}
+	if err != nil {
+		return fmt.Errorf("read file metadata trailer: %w", err)
 	}
 	if !bytes.HasPrefix(chunk, []byte(metaPrefix)) {
 		return fmt.Errorf("unexpected trailer data")
@@ -1738,12 +1593,27 @@ func verifyMetadata(reader *aeadReader, digest []byte) error {
 	if err := json.Unmarshal(chunk[len(metaPrefix):], &meta); err != nil {
 		return err
 	}
-	if meta.Hash == "blake3-256" && len(meta.Digest) > 0 {
-		if !hmac.Equal(digest, meta.Digest) {
-			return fmt.Errorf("file hash mismatch")
-		}
+	if meta.Hash != fileHashAlgorithm {
+		return fmt.Errorf("unsupported file hash %q", meta.Hash)
 	}
-	return nil
+	if meta.ChunkSize != expectedChunkSize {
+		return fmt.Errorf("file chunk size mismatch: expected %d, received %d", expectedChunkSize, meta.ChunkSize)
+	}
+	if meta.Size != expectedSize {
+		return fmt.Errorf("file size mismatch: expected %d, received %d", expectedSize, meta.Size)
+	}
+	if len(digest) != fileDigestSize || len(meta.Digest) != fileDigestSize {
+		return fmt.Errorf("invalid file digest length")
+	}
+	if !hmac.Equal(digest, meta.Digest) {
+		return fmt.Errorf("file hash mismatch")
+	}
+	if _, err := reader.ReadChunk(); errors.Is(err, io.EOF) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("read after file metadata trailer: %w", err)
+	}
+	return errors.New("unexpected encrypted chunk after file metadata trailer")
 }
 
 func selfSignedTLS() (*tls.Config, error) {

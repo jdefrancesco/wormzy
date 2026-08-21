@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -14,10 +15,13 @@ import (
 	"github.com/jdefrancesco/wormzy/internal/transport"
 )
 
+const defaultMailboxRedisURL = "127.0.0.1:6379"
+
+// main runs the bounded HTTP mailbox service until shutdown.
 func main() {
 	var (
 		listen   = flag.String("listen", ":8080", "http listen address")
-		redisURL = flag.String("redis", "127.0.0.1:6379", "redis connection url")
+		redisURL = flag.String("redis", "", "redis connection URL (prefer WORMZY_MAILBOX_REDIS)")
 		ttl      = flag.Duration("ttl", 10*time.Minute, "session ttl")
 		version  = flag.Bool("version", false, "print version and exit")
 	)
@@ -27,7 +31,8 @@ func main() {
 		return
 	}
 
-	server, err := transport.NewMailboxHTTPServer(*redisURL, *ttl)
+	configuredRedis := configuredMailboxRedisURL(*redisURL)
+	server, err := transport.NewMailboxHTTPServer(configuredRedis, *ttl)
 	if err != nil {
 		log.Fatalf("failed to init server: %v", err)
 	}
@@ -39,11 +44,11 @@ func main() {
 		defer close(opsDone)
 		server.RunOperations(ctx, 5*time.Second)
 	}()
-	log.Printf("wormzy relay proxy listening on %s (redis %s)", *listen, *redisURL)
+	log.Printf("wormzy mailbox proxy listening on %s", *listen)
 	srv := &http.Server{
 		Addr:    *listen,
 		Handler: server,
-		// /v1/wait-peer and /v1/receive are long-poll style endpoints and can
+		// /v2/wait-peer and /v2/receive are long-poll style endpoints and can
 		// legitimately hold the response open for most of the handshake window.
 		// Keep read timeouts strict, but do not enforce a short write timeout.
 		ReadTimeout:  15 * time.Second,
@@ -64,4 +69,15 @@ func main() {
 	if err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+// configuredMailboxRedisURL prefers an explicit flag, then the protected service environment.
+func configuredMailboxRedisURL(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if value := os.Getenv("WORMZY_MAILBOX_REDIS"); value != "" {
+		return value
+	}
+	return defaultMailboxRedisURL
 }

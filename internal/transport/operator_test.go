@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -80,6 +81,8 @@ func TestMetricsCollector_ServiceTelemetryAndDrainControl(t *testing.T) {
 	}
 }
 
+// TestMetricsCollector_TerminateSession verifies operator deletion releases
+// both session storage and global admission capacity.
 func TestMetricsCollector_TerminateSession(t *testing.T) {
 	mini, err := miniredis.Run()
 	if err != nil {
@@ -90,8 +93,9 @@ func TestMetricsCollector_TerminateSession(t *testing.T) {
 	ctx := context.Background()
 	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
 	defer client.Close()
-	store := newSessionStore(client, 10*time.Minute, "wormzy")
-	if _, err := store.registerSender(ctx, "control-test-01"); err != nil {
+	store := newSessionStore(client, 10*time.Minute, mailboxV2StorePrefix)
+	sessionID := sessionStoreTestID(0x54)
+	if _, err := store.registerSender(ctx, sessionID, sessionStoreTestCapability(t, 0x33)); err != nil {
 		t.Fatalf("register sender: %v", err)
 	}
 
@@ -100,11 +104,14 @@ func TestMetricsCollector_TerminateSession(t *testing.T) {
 		t.Fatalf("NewMetricsCollector: %v", err)
 	}
 	defer collector.Close()
-	if err := collector.TerminateSession(ctx, "control-test-01"); err != nil {
+	if err := collector.TerminateSession(ctx, sessionID); err != nil {
 		t.Fatalf("TerminateSession: %v", err)
 	}
-	if _, err := store.load(ctx, "control-test-01"); !errors.Is(err, errSessionNotFound) {
+	if _, err := store.load(ctx, sessionID); !errors.Is(err, errSessionNotFound) {
 		t.Fatalf("load after terminate = %v; want %v", err, errSessionNotFound)
+	}
+	if _, err := client.ZScore(ctx, store.activeSessionsKey(), sessionID).Result(); !errors.Is(err, redis.Nil) {
+		t.Fatalf("active-session index after terminate = %v; want %v", err, redis.Nil)
 	}
 }
 
@@ -131,7 +138,7 @@ func TestRedisMailbox_DrainRejectsDirectSender(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newRedisMailboxWithClient: %v", err)
 	}
-	if _, err := mailbox.Claim(ctx, "direct-drain-01"); !errors.Is(err, errServiceDraining) {
+	if _, err := mailbox.Claim(ctx, sessionStoreTestID(0x55)); !errors.Is(err, errServiceDraining) {
 		t.Fatalf("direct sender claim = %v; want %v", err, errServiceDraining)
 	}
 }
@@ -146,14 +153,15 @@ func TestMetricsCollector_UsesRedisSessionTTL(t *testing.T) {
 	ctx := context.Background()
 	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
 	defer client.Close()
-	sess := newSession("ttl-test-01", 10*time.Minute)
+	sessionID := sessionStoreTestID(0x56)
+	sess := newSession(sessionID, 10*time.Minute)
 	sess.CreatedUnix = time.Now().Add(-9 * time.Minute).Unix()
 	sess.Sender = &sessionPeer{Role: "send"}
 	payload, err := json.Marshal(sess)
 	if err != nil {
 		t.Fatalf("marshal session: %v", err)
 	}
-	if err := client.Set(ctx, "wormzy:sessions:ttl-test-01", payload, 10*time.Minute).Err(); err != nil {
+	if err := client.Set(ctx, mailboxV2StorePrefix+":sessions:"+sessionID, payload, 10*time.Minute).Err(); err != nil {
 		t.Fatalf("set session: %v", err)
 	}
 
@@ -171,6 +179,9 @@ func TestMetricsCollector_UsesRedisSessionTTL(t *testing.T) {
 	}
 	if metrics.Active[0].TTLRemaining < 9*time.Minute {
 		t.Fatalf("TTL remaining = %s; want Redis TTL near 10m", metrics.Active[0].TTLRemaining)
+	}
+	if metrics.Active[0].ID != sessionID || metrics.Active[0].Code != mailboxSessionAlias(sessionID) {
+		t.Fatalf("session identity leaked or lost: %+v", metrics.Active[0])
 	}
 }
 
@@ -222,6 +233,21 @@ func TestServiceTelemetry_ConcurrentCounters(t *testing.T) {
 	}
 }
 
+// TestMetricsAggregationSaturates verifies malformed persisted counters cannot
+// wrap dashboard byte or duration totals into negative values.
+func TestMetricsAggregationSaturates(t *testing.T) {
+	if got := saturatingMetricsAdd(math.MaxInt64-2, 10); got != math.MaxInt64 {
+		t.Fatalf("saturating add = %d; want %d", got, int64(math.MaxInt64))
+	}
+	if got := saturatingMetricsAdd(12, -1); got != 12 {
+		t.Fatalf("negative addition changed total to %d", got)
+	}
+	if got := metricsDurationFromMillis(math.MaxInt64); got != time.Duration(math.MaxInt64) {
+		t.Fatalf("duration conversion = %s; want saturation", got)
+	}
+}
+
+// findServiceSnapshot returns the named service or fails the calling test.
 func findServiceSnapshot(t *testing.T, services []ServiceSnapshot, name string) ServiceSnapshot {
 	t.Helper()
 	for _, service := range services {

@@ -1,6 +1,6 @@
 # NAT Traversal and NAT Table Evolution
 
-This document explains UDP NAT traversal using a rendezvous server, including:
+This document explains UDP NAT traversal using STUN plus a separate rendezvous channel, including:
 
 - how peers learn each other’s public endpoint
 - how UDP hole punching works
@@ -8,34 +8,44 @@ This document explains UDP NAT traversal using a rendezvous server, including:
 - a side-by-side comparison of a successful case vs. a symmetric NAT failure case
 
 
-## Breakdown
+## Classic UDP Punching Model
 
 Each client:
 
-1. Creates **one UDP socket**
-2. Sends a packet to the **rendezvous server**
-3. The rendezvous server records the **public source IP:port** it observes
-4. The rendezvous server exchanges those observed public endpoints between the two peers
+1. Creates a UDP socket for the traversal path
+2. Sends a binding request to a **STUN server** from that socket
+3. The STUN server returns the **public source IP:port** it observes
+4. A separate rendezvous channel exchanges those observed public endpoints between the two peers
 5. Both peers start sending UDP punch packets to the public endpoint they were given
 6. If both NATs are friendly enough, the packets cross and direct connectivity is established
 
-The most important rule:
+Within this classic path, the most important rule is:
 
-> Use the **same UDP socket** for rendezvous, punching, and later peer traffic.
+> Use the same UDP socket for STUN, punching, and later peer traffic on that path.
 
 If you create a different socket later, the NAT may assign a different mapping and the peer will be sending to the wrong place.
 
+## Wormzy's Two Socket Paths
 
-## What Rendezvous Server Does...
+Wormzy does not use one UDP socket for every traversal strategy. Its pairing code and candidate metadata travel through the HTTPS mailbox, not through a UDP rendezvous packet. A direct Redis mailbox is available only over loopback or a local Unix socket for development:
 
-When each client sends to the rendezvous server, the server sees the packet after NAT translation.
+- Pion ICE owns its own sockets and first gathers host, server-reflexive, and explicitly configured TURN candidates. Pion then performs the first connectivity checks; a configured TURN candidate may win during this initial attempt.
+- Wormzy separately binds a legacy UDP socket. `DiscoverOnConn` probes a shuffled STUN server list sequentially on that socket so its reflexive address remains valid for the later legacy punch and QUIC path.
+- Immediately before Pion calls `Dial` or `Accept`, Wormzy arms a 1.5-second timer. If ICE is still unresolved when it expires, Wormzy may map the legacy socket with UPnP. The mapping is not injected into Pion ICE.
+- If ICE succeeds, the UPnP attempt is canceled and any mapping is removed. If ICE fails, peers authenticate readiness and refreshed candidate snapshots with the CPace-derived key before the legacy direct race uses a validated UPnP candidate.
+- The custom Wormzy relay is tried after the direct paths fail. It is distinct from an explicitly configured TURN server inside Pion ICE.
+
+
+## What the STUN Server Does...
+
+When each client sends to a STUN server, the server sees the packet after NAT translation.
 
 For example:
 
 - Alice local socket: `10.0.0.10:40000`
 - NAT-A public IP: `198.51.100.10`
 
-Alice sends to rendezvous:
+Alice sends to STUN:
 
 ```text
 src = 10.0.0.10:40000
@@ -49,7 +59,7 @@ src = 198.51.100.10:62000
 dst = 198.51.100.200:3478
 ```
 
-So the rendezvous server records:
+So the STUN server returns:
 
 ```text
 Alice = 198.51.100.10:62000
@@ -59,7 +69,7 @@ That public endpoint is what gets shared with Bob.
 
 ## Successful UDP Punch 
 
-Assume *wormzy rendezvous* server
+Assume a public STUN server plus Wormzy's mailbox rendezvous.
 
 ### Actors
 
@@ -98,14 +108,14 @@ Neither NAT has a mapping yet obviously...
 
 > As you'd expect. No outside host can send directly to Alice or Bob yet.
 
-## Step 1: Alice talks to rendezvous
+## Step 1: Alice talks to STUN
 
-Alice sends a UDP packet from her one bound socket:
+Alice sends a UDP packet from this traversal socket:
 
 ```text
 src = 10.0.0.10:40000
 dst = 198.51.100.200:3478
-payload = "register alice"
+payload = "STUN binding request"
 ```
 
 NAT-A creates a public mapping. Suppose NAT-A chooses public port `62000`.
@@ -121,23 +131,23 @@ dst = 198.51.100.200:3478
 
 ```text
 Inside                    Outside/Public            Allowed remote
-10.0.0.10:40000    <->    198.51.100.10:62000      (at least rendezvous server)
+10.0.0.10:40000    <->    198.51.100.10:62000      (at least the STUN server)
 ```
 
-### Rendezvous server observes
+### STUN server observes
 
 ```text
 Alice appears as 198.51.100.10:62000
 ```
 
-## Step 2: Bob talks to rendezvous
+## Step 2: Bob talks to STUN
 
-Bob sends from his one bound socket:
+Bob sends from his traversal socket:
 
 ```text
 src = 192.168.1.20:50000
 dst = 198.51.100.200:3478
-payload = "register bob"
+payload = "STUN binding request"
 ```
 
 NAT-B creates a mapping. Suppose it chooses public port `61000`.
@@ -153,16 +163,16 @@ dst = 198.51.100.200:3478
 
 ```text
 Inside                     Outside/Public           Allowed remote
-192.168.1.20:50000   <->   203.0.113.20:61000      (at least rendezvous server)
+192.168.1.20:50000   <->   203.0.113.20:61000      (at least the STUN server)
 ```
 
-### Rendezvous server observes
+### STUN server observes
 
 ```text
 Bob appears as 203.0.113.20:61000
 ```
 
-## Step 3: rendezvous exchanges endpoints
+## Step 3: the mailbox exchanges endpoints
 
 ### Server now sends:
 
@@ -183,13 +193,13 @@ At this point...
 #### NAT-A table
 
 ```text
-10.0.0.10:40000  <->  198.51.100.10:62000   remote seen: rendezvous
+10.0.0.10:40000  <->  198.51.100.10:62000   remote seen: STUN
 ```
 
 #### NAT-B table
 
 ```text
-192.168.1.20:50000 <-> 203.0.113.20:61000   remote seen: rendezvous
+192.168.1.20:50000 <-> 203.0.113.20:61000   remote seen: STUN
 ```
 
 ## Step 4: Alice sends first punch to Bob
@@ -220,7 +230,7 @@ payload = "punch"
 
 ```text
 Inside                    Outside/Public            Remote destinations contacted
-10.0.0.10:40000    <->    198.51.100.10:62000      rendezvous, 203.0.113.20:61000
+10.0.0.10:40000    <->    198.51.100.10:62000      STUN, 203.0.113.20:61000
 ```
 
 
@@ -252,7 +262,7 @@ payload = "punch"
 
 ```text
 Inside                     Outside/Public           Remote destinations contacted
-192.168.1.20:50000   <->   203.0.113.20:61000      rendezvous, 198.51.100.10:62000
+192.168.1.20:50000   <->   203.0.113.20:61000      STUN, 198.51.100.10:62000
 ```
 
 
@@ -350,26 +360,26 @@ The key problem:
 ```text
 Alice local socket 10.0.0.10:40000
 
-to rendezvous  -> 198.51.100.10:62000
+to STUN        -> 198.51.100.10:62000
 to Bob         -> 198.51.100.10:63055
 ```
 
->That is why the rendezvous server gives Bob information that is no longer transferable.
+>That is why the STUN-observed mapping shared with Bob is no longer transferable.
 
 ## TLDR
 
 **Again, in summary because all this NAT nonsense can fry your brain...**
 
-### Attempt NAT Punch:
+### Wormzy's order:
 
-1. UDP hole punching first
-2. Exchange observed public endpoints via rendezvous
-3. Start simultaneous probe bursts
-4. Keep mappings alive with keepalives
-5. Detect failure quickly
-6. Fall back to a relay for symmetric NAT / CGNAT / blocked cases
+1. Claim and display the pairing code through the mailbox
+2. Exchange initial local and reflexive metadata, then derive the CPace key
+3. Try Pion ICE on Pion-owned sockets
+4. If ICE remains unresolved 1.5 seconds after connectivity checks begin, try UPnP on the separate legacy socket
+5. If ICE fails, authenticate refreshed candidates and start the legacy punch race
+6. Fall back to the custom relay for symmetric NAT, CGNAT, or blocked cases
 
 
 ## But... Remember
 
-> Do whatever you can so `wormzy` can establish a fast P2P link you can use to send the latest bloated AI model with! 
+> Do whatever you can so `wormzy` can establish a fast P2P link you can use to send the latest bloated AI model with!

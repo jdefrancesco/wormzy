@@ -2,16 +2,23 @@ package transport
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jdefrancesco/wormzy/internal/rendezvous"
 )
 
 const (
-	metaPrefix = "META:"
-	chunkSize  = 1 << 16
+	metaPrefix              = "META:"
+	chunkSize               = 1 << 16
+	maxPeerCandidateCount   = 16
+	maxCandidateFieldLength = 256
+	maxCandidatePriority    = 10000
+	minCandidatePriority    = -10000
 )
 
 func buildCandidates(self rendezvous.SelfInfo, loopback bool, upnpAddr, relayAddr string) []rendezvous.Candidate {
@@ -47,16 +54,32 @@ func buildCandidates(self rendezvous.SelfInfo, loopback bool, upnpAddr, relayAdd
 }
 
 func selectPeerCandidates(self, peer rendezvous.SelfInfo, loopback bool) ([]rendezvous.Candidate, *rendezvous.Candidate, error) {
+	if err := validatePeerCandidateMetadata(peer); err != nil {
+		return nil, nil, err
+	}
 	if loopback && peer.Local != "" {
+		local, ok := normalizedPeerCandidate(rendezvous.Candidate{Type: "loopback", Proto: "udp", Addr: peer.Local}, true, true, nil)
+		if !ok {
+			return nil, nil, errors.New("peer loopback candidate is invalid")
+		}
 		return []rendezvous.Candidate{{
-			Type:     "loopback",
-			Proto:    "udp",
-			Addr:     peer.Local,
-			Priority: 120,
+			Type:     local.Type,
+			Proto:    local.Proto,
+			Addr:     local.Addr,
+			Priority: local.Priority,
 		}}, nil, nil
 	}
 
-	preferLocal := loopback || samePublicIP(self.Public, peer.Public)
+	// Outside explicit loopback mode, Pion ICE validates same-LAN host
+	// candidates with connectivity checks. The legacy race must not dial a
+	// peer-supplied private address merely because the peer claims our public IP.
+	preferLocal := loopback
+	allowedRelays := make(map[string]struct{})
+	for _, candidate := range self.Candidates {
+		if strings.EqualFold(candidate.Type, "relay") && strings.EqualFold(candidate.Proto, "udp") {
+			allowedRelays[candidate.Addr] = struct{}{}
+		}
+	}
 
 	var (
 		relayCand *rendezvous.Candidate
@@ -75,11 +98,11 @@ func selectPeerCandidates(self, peer rendezvous.SelfInfo, loopback bool) ([]rend
 		direct = append(direct, cand)
 	}
 	for _, cand := range peer.Candidates {
-		if cand.Proto != "udp" {
+		cand, ok := normalizedPeerCandidate(cand, preferLocal, loopback, allowedRelays)
+		if !ok {
 			continue
 		}
-		cand := cand
-		if strings.Contains(strings.ToLower(cand.Type), "relay") {
+		if cand.Type == "relay" {
 			if relayCand == nil {
 				relayCand = &cand
 			}
@@ -88,20 +111,26 @@ func selectPeerCandidates(self, peer rendezvous.SelfInfo, loopback bool) ([]rend
 		addDirect(cand)
 	}
 	if !preferLocal && peer.Public != "" {
-		addDirect(rendezvous.Candidate{
+		candidate, ok := normalizedPeerCandidate(rendezvous.Candidate{
 			Type:     "legacy-public",
 			Proto:    "udp",
 			Addr:     peer.Public,
 			Priority: 10,
-		})
+		}, preferLocal, loopback, allowedRelays)
+		if ok {
+			addDirect(candidate)
+		}
 	}
-	if peer.Local != "" {
-		addDirect(rendezvous.Candidate{
+	if preferLocal && peer.Local != "" {
+		candidate, ok := normalizedPeerCandidate(rendezvous.Candidate{
 			Type:     "legacy-local",
 			Proto:    "udp",
 			Addr:     peer.Local,
 			Priority: 5,
-		})
+		}, preferLocal, loopback, allowedRelays)
+		if ok {
+			addDirect(candidate)
+		}
 	}
 
 	sort.SliceStable(direct, func(i, j int) bool {
@@ -120,6 +149,106 @@ func selectPeerCandidates(self, peer rendezvous.SelfInfo, loopback bool) ([]rend
 		return nil, relayCand, nil
 	}
 	return nil, relayCand, errors.New("peer did not advertise any UDP candidates")
+}
+
+// validatePeerCandidateMetadata bounds and sanitizes metadata before it reaches logs or dial scheduling.
+func validatePeerCandidateMetadata(peer rendezvous.SelfInfo) error {
+	if len(peer.Candidates) > maxPeerCandidateCount {
+		return fmt.Errorf("peer candidate count exceeds limit of %d", maxPeerCandidateCount)
+	}
+	for name, value := range map[string]string{"public": peer.Public, "local": peer.Local} {
+		if value != "" && !safeCandidateText(value) {
+			return fmt.Errorf("peer %s endpoint contains invalid text", name)
+		}
+	}
+	for _, candidate := range peer.Candidates {
+		if !safeCandidateText(candidate.Type) || !safeCandidateText(candidate.Proto) || !safeCandidateText(candidate.Addr) {
+			return errors.New("peer candidate contains invalid text")
+		}
+		if candidate.Priority < minCandidatePriority || candidate.Priority > maxCandidatePriority {
+			return errors.New("peer candidate priority is out of range")
+		}
+	}
+	return nil
+}
+
+// normalizedPeerCandidate validates a candidate target and assigns a local priority.
+func normalizedPeerCandidate(
+	candidate rendezvous.Candidate,
+	preferLocal bool,
+	loopback bool,
+	allowedRelays map[string]struct{},
+) (rendezvous.Candidate, bool) {
+	typ := strings.ToLower(strings.TrimSpace(candidate.Type))
+	proto := strings.ToLower(strings.TrimSpace(candidate.Proto))
+	if proto != "udp" || candidate.Addr == "" {
+		return rendezvous.Candidate{}, false
+	}
+	if typ == "relay" {
+		if _, ok := allowedRelays[candidate.Addr]; !ok {
+			return rendezvous.Candidate{}, false
+		}
+		return rendezvous.Candidate{Type: "relay", Proto: "udp", Addr: candidate.Addr, Priority: 40}, true
+	}
+	host, portText, err := net.SplitHostPort(candidate.Addr)
+	if err != nil {
+		return rendezvous.Candidate{}, false
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 || port > 65535 {
+		return rendezvous.Candidate{}, false
+	}
+	ip := net.ParseIP(host).To4()
+	if ip == nil {
+		return rendezvous.Candidate{}, false
+	}
+	addr := net.JoinHostPort(ip.String(), strconv.Itoa(port))
+	switch typ {
+	case "reflexive":
+		if !isUsableExternalIPv4(ip) {
+			return rendezvous.Candidate{}, false
+		}
+		return rendezvous.Candidate{Type: typ, Proto: "udp", Addr: addr, Priority: 100}, true
+	case "upnp":
+		if !isUsableExternalIPv4(ip) {
+			return rendezvous.Candidate{}, false
+		}
+		return rendezvous.Candidate{Type: typ, Proto: "udp", Addr: addr, Priority: 110}, true
+	case "local", "legacy-local":
+		if !preferLocal || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLoopback() {
+			return rendezvous.Candidate{}, false
+		}
+		priority := 60
+		if typ == "legacy-local" {
+			priority = 5
+		}
+		return rendezvous.Candidate{Type: typ, Proto: "udp", Addr: addr, Priority: priority}, true
+	case "loopback":
+		if !loopback || !ip.IsLoopback() {
+			return rendezvous.Candidate{}, false
+		}
+		return rendezvous.Candidate{Type: typ, Proto: "udp", Addr: addr, Priority: 120}, true
+	case "legacy-public":
+		if !isUsableExternalIPv4(ip) {
+			return rendezvous.Candidate{}, false
+		}
+		return rendezvous.Candidate{Type: typ, Proto: "udp", Addr: addr, Priority: 10}, true
+	default:
+		return rendezvous.Candidate{}, false
+	}
+}
+
+// safeCandidateText rejects oversized, invalid, or terminal-control-bearing metadata.
+func safeCandidateText(value string) bool {
+	if value == "" || len(value) > maxCandidateFieldLength || !utf8.ValidString(value) {
+		return false
+	}
+	for _, char := range value {
+		if char < 0x21 || char > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func candidateRaceWeight(cand rendezvous.Candidate, preferLocal bool) int {
@@ -181,12 +310,6 @@ func pickFallbackDirectCandidate(candidates []rendezvous.Candidate) rendezvous.C
 		}
 	}
 	return candidates[0]
-}
-
-func samePublicIP(a, b string) bool {
-	ha := hostPart(a)
-	hb := hostPart(b)
-	return ha != "" && ha == hb
 }
 
 func hostPart(addr string) string {
