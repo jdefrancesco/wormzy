@@ -32,6 +32,12 @@ import (
 	"github.com/jdefrancesco/wormzy/internal/ui"
 )
 
+const (
+	bannerTitleColor    = "#b7d7b1"
+	bannerSubtitleColor = "#727f79"
+	bannerBorderColor   = "#afcfaa"
+)
+
 // boldCodeStyle returns the style used for pairing codes in headless output.
 func boldCodeStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFD75F"))
@@ -40,13 +46,13 @@ func boldCodeStyle() lipgloss.Style {
 var (
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#90cc8918"))
+			Foreground(lipgloss.Color(bannerTitleColor))
 	subtitleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#727f79"))
+			Foreground(lipgloss.Color(bannerSubtitleColor))
 
 	boxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#afcfaa43")).
+			BorderForeground(lipgloss.Color(bannerBorderColor)).
 			Padding(1, 3)
 )
 

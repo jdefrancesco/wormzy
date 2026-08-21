@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -50,6 +51,25 @@ func TestParseCLI_SendHelp_PrintsUsageOnce(t *testing.T) {
 	}
 	if !strings.Contains(output, "--logs") {
 		t.Fatalf("expected send help to document --logs\noutput:\n%s", output)
+	}
+}
+
+func TestBannerColorsUseSixDigitHex(t *testing.T) {
+	colors := map[string]string{
+		"title":    bannerTitleColor,
+		"subtitle": bannerSubtitleColor,
+		"border":   bannerBorderColor,
+	}
+
+	for name, color := range colors {
+		t.Run(name, func(t *testing.T) {
+			if len(color) != 7 || color[0] != '#' {
+				t.Fatalf("banner color %q must use #RRGGBB format", color)
+			}
+			if _, err := strconv.ParseUint(color[1:], 16, 24); err != nil {
+				t.Fatalf("banner color %q is not valid hexadecimal: %v", color, err)
+			}
+		})
 	}
 }
 
