@@ -10,6 +10,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/jdefrancesco/wormzy/internal/rendezvous"
 )
 
 const (
@@ -20,7 +22,7 @@ const (
 
 var (
 	errInvalidTransferStats = errors.New("invalid transfer statistics")
-	pairingCodeTextPattern  = regexp.MustCompile(`(?i)[a-z2-7]{4}(?:-[a-z2-7]{4}){4}`)
+	pairingCodeTextPattern  = rendezvous.CodeTextPattern
 	mailboxIDTextPattern    = regexp.MustCompile(`mbx2-[A-Za-z0-9_-]{43}`)
 )
 
@@ -149,8 +151,13 @@ func transportLabelForReportedCandidate(candidate string) string {
 // sanitizeReportedStatsText redacts secrets, removes terminal controls, and
 // caps untrusted text without splitting a UTF-8 encoding.
 func sanitizeReportedStatsText(value string) string {
-	value = pairingCodeTextPattern.ReplaceAllString(value, "[redacted-code]")
-	value = mailboxIDTextPattern.ReplaceAllString(value, "[redacted-session]")
+	// Redact the longer, tightly-anchored mailbox ID first: it can contain
+	// "-" (part of RawURLEncoding's alphabet) that would otherwise let the
+	// shorter pairing-code pattern tear a false match out of its middle and
+	// leave the rest of the identifier exposed. Markers avoid "-" entirely
+	// so neither pattern can re-match inside the other's replacement text.
+	value = mailboxIDTextPattern.ReplaceAllString(value, "[redacted_session]")
+	value = pairingCodeTextPattern.ReplaceAllString(value, "[redacted_code]")
 
 	var out strings.Builder
 	out.Grow(min(len(value), maxReportedStatsTextBytes))

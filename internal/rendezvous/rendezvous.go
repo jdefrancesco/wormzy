@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -29,8 +30,17 @@ const (
 	msgPAKE1 = "pake1"
 	msgPAKE2 = "pake2"
 
-	generatedCodeBytes     = 12
+	// generatedCodeBytes controls the pairing code's entropy (40 bits). The
+	// code doubles as the CPace PAKE secret, but CPace already defeats
+	// offline guessing from a captured transcript; the mailbox server's
+	// rate limiting and TTL bound the remaining online-guessing risk, so
+	// the code itself only needs to stay inconvenient to guess online.
+	generatedCodeBytes     = 5
 	generatedCodeGroupSize = 4
+	// generatedCodeGroups is derived from generatedCodeBytes/generatedCodeGroupSize:
+	// base32 encodes 5 bits/char, so ceil(bytes*8/5) chars grouped into
+	// generatedCodeGroupSize-character chunks.
+	generatedCodeGroups = ((generatedCodeBytes*8+4)/5 + generatedCodeGroupSize - 1) / generatedCodeGroupSize
 )
 
 // Server implements the rendezvous relay responsible for pairing senders and
@@ -322,17 +332,23 @@ func GenerateCode() (string, error) {
 	return defaultCode()
 }
 
+// CodeTextPattern matches a Wormzy pairing code embedded in free text (e.g.
+// for redacting it from logs). It is derived from the same group constants
+// NormalizeCode enforces, so the two never drift apart.
+var CodeTextPattern = regexp.MustCompile(fmt.Sprintf(`(?i)[a-z2-7]{%d}(?:-[a-z2-7]{%d}){%d}`,
+	generatedCodeGroupSize, generatedCodeGroupSize, generatedCodeGroups-1))
+
 // NormalizeCode validates a Wormzy pairing code and returns its canonical
 // lowercase, grouped representation.
 func NormalizeCode(code string) (string, error) {
 	code = strings.ToLower(strings.TrimSpace(code))
 	parts := strings.Split(code, "-")
-	if len(parts) != 5 {
-		return "", errors.New("pairing code must contain five groups of four characters")
+	if len(parts) != generatedCodeGroups {
+		return "", fmt.Errorf("pairing code must contain %d groups of %d characters", generatedCodeGroups, generatedCodeGroupSize)
 	}
 	for _, part := range parts {
 		if len(part) != generatedCodeGroupSize {
-			return "", errors.New("pairing code groups must contain four characters")
+			return "", fmt.Errorf("pairing code groups must contain %d characters", generatedCodeGroupSize)
 		}
 	}
 	compact := strings.Join(parts, "")

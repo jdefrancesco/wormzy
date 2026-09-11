@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-const testPairingCode = "gayt-emzu-gu3d-oobz-mfra"
+const testPairingCode = "gayt-emzu"
 
 // TestDeriveMailboxSessionIDHidesPairingCode verifies routing is stable,
 // domain-separated, and does not carry the human secret verbatim.

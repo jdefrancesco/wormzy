@@ -3,16 +3,18 @@ package rendezvous
 import (
 	"encoding/base32"
 	"errors"
+	"fmt"
 	"net"
 	"regexp"
 	"strings"
 	"testing"
 )
 
-// TestDefaultCodeFormat verifies generated codes preserve 96 bits in the
+// TestDefaultCodeFormat verifies generated codes preserve 40 bits in the
 // copy-friendly grouped representation.
 func TestDefaultCodeFormat(t *testing.T) {
-	rx := regexp.MustCompile(`^[a-z2-7]{4}(?:-[a-z2-7]{4}){4}$`)
+	rx := regexp.MustCompile(fmt.Sprintf(`^[a-z2-7]{%d}(?:-[a-z2-7]{%d}){%d}$`,
+		generatedCodeGroupSize, generatedCodeGroupSize, generatedCodeGroups-1))
 	for i := 0; i < 10; i++ {
 		code, err := defaultCode()
 		if err != nil {
@@ -51,7 +53,7 @@ func TestGenerateCodeFromFailsClosed(t *testing.T) {
 // TestNormalizeCodeRejectsWeakOrMalformedInput verifies custom codes cannot
 // silently reduce the mailbox-hidden PAKE secret's entropy.
 func TestNormalizeCodeRejectsWeakOrMalformedInput(t *testing.T) {
-	code, err := generateCodeFrom(strings.NewReader("0123456789ab"))
+	code, err := generateCodeFrom(strings.NewReader("01234"))
 	if err != nil {
 		t.Fatalf("generate deterministic code: %v", err)
 	}
@@ -61,8 +63,8 @@ func TestNormalizeCodeRejectsWeakOrMalformedInput(t *testing.T) {
 	}
 	for _, invalid := range []string{
 		"abcd-ef",
-		"zzzz-zzzz-zzzz-zzzz-zzz0",
-		"upnp-ab-0123456789abcdef",
+		"abcd-efgh-ijkl",
+		"abcd-efg1",
 	} {
 		if _, err := NormalizeCode(invalid); err == nil {
 			t.Fatalf("NormalizeCode accepted %q", invalid)

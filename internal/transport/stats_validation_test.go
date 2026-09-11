@@ -88,7 +88,7 @@ func TestValidateAndSanitizeTransferStatsRedactsSecrets(t *testing.T) {
 	if strings.ContainsAny(got.DirectSummary, "\n\r\a\x1b") {
 		t.Fatalf("sanitized summary contains terminal controls: %q", got.DirectSummary)
 	}
-	if !strings.Contains(got.DirectSummary, "[redacted-code]") || !strings.Contains(got.DirectSummary, "[redacted-session]") {
+	if !strings.Contains(got.DirectSummary, "[redacted_code]") || !strings.Contains(got.DirectSummary, "[redacted_session]") {
 		t.Fatalf("sanitized summary lacks redaction markers: %q", got.DirectSummary)
 	}
 	if got.Error != "network" {
