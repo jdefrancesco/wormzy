@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
-	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,16 +29,17 @@ const (
 	msgPAKE1 = "pake1"
 	msgPAKE2 = "pake2"
 
-	// generatedCodeBytes controls the pairing code's entropy (64 bits). The
-	// mailbox routing ID is a deterministic hash of this code, so the code must
-	// resist offline guessing independently of the CPace transcript.
-	generatedCodeBytes          = 8
+	// generatedCodeAlphabet omits 0, 1, i, l, o, and u so codes remain clear
+	// even when the user's terminal font does not distinguish similar glyphs.
+	// Six uniform base-30 symbols provide about 29.4 bits of entropy.
+	generatedCodeAlphabet       = "23456789abcdefghjkmnpqrstvwxyz"
+	generatedCodeAlphabetSize   = len(generatedCodeAlphabet)
+	generatedCodeRejectionLimit = 256 - (256 % generatedCodeAlphabetSize)
+	generatedCodeSymbols        = 6
+	generatedCodeMaxRandomDraws = generatedCodeSymbols * 16
 	generatedCodeGroupSize      = 4
-	generatedCodePrefixGroups   = 2
-	generatedCodeGroups         = generatedCodePrefixGroups + 1
-	generatedCodeEncodedLength  = (generatedCodeBytes*8 + 4) / 5
-	generatedCodeFinalGroupSize = generatedCodeEncodedLength - generatedCodePrefixGroups*generatedCodeGroupSize
-	generatedCodeFormat         = "xxxx-xxxx-xxxxx"
+	generatedCodeFinalGroupSize = generatedCodeSymbols - generatedCodeGroupSize
+	generatedCodeFormat         = "xxxx-xx"
 )
 
 // Server implements the rendezvous relay responsible for pairing senders and
@@ -330,11 +330,11 @@ func GenerateCode() (string, error) {
 	return defaultCode()
 }
 
-// CodeTextPattern matches a Wormzy pairing code embedded in free text (e.g.
-// for redacting it from logs). It is derived from the same group constants
-// NormalizeCode enforces, so the two never drift apart.
-var CodeTextPattern = regexp.MustCompile(fmt.Sprintf(`(?i)[a-z2-7]{%d}(?:-[a-z2-7]{%d}){%d}-[a-z2-7]{%d}`,
-	generatedCodeGroupSize, generatedCodeGroupSize, generatedCodePrefixGroups-1, generatedCodeFinalGroupSize))
+// CodeTextPattern matches a whole grouped Wormzy pairing code embedded in free
+// text for redaction. Word boundaries prevent the short pattern from matching
+// fragments of longer diagnostic tokens.
+var CodeTextPattern = regexp.MustCompile(fmt.Sprintf(`(?i)\b[2-9a-hj-km-np-tv-z]{%d}-[2-9a-hj-km-np-tv-z]{%d}\b`,
+	generatedCodeGroupSize, generatedCodeFinalGroupSize))
 
 // invalidPairingCodeFormatError explains the current format and its
 // mixed-version upgrade requirement.
@@ -343,49 +343,45 @@ func invalidPairingCodeFormatError() error {
 }
 
 // NormalizeCode validates a Wormzy pairing code and returns its canonical
-// lowercase, grouped representation.
+// lowercase, grouped representation. It accepts an omitted hyphen and rejects
+// visually ambiguous symbols that the generator never emits.
 func NormalizeCode(code string) (string, error) {
-	code = strings.ToLower(strings.TrimSpace(code))
-	parts := strings.Split(code, "-")
-	if len(parts) != generatedCodeGroups {
+	symbols := []rune(strings.ToLower(strings.TrimSpace(code)))
+	switch {
+	case len(symbols) == generatedCodeSymbols:
+	case len(symbols) == generatedCodeSymbols+1 && symbols[generatedCodeGroupSize] == '-':
+		symbols = append(symbols[:generatedCodeGroupSize], symbols[generatedCodeGroupSize+1:]...)
+	default:
 		return "", invalidPairingCodeFormatError()
 	}
-	for index, part := range parts {
-		expectedSize := generatedCodeGroupSize
-		if index == generatedCodeGroups-1 {
-			expectedSize = generatedCodeFinalGroupSize
+	for index, symbol := range symbols {
+		if !strings.ContainsRune(generatedCodeAlphabet, symbol) {
+			return "", fmt.Errorf("pairing code contains invalid character %q", symbol)
 		}
-		if len(part) != expectedSize {
-			return "", invalidPairingCodeFormatError()
-		}
+		symbols[index] = symbol
 	}
-	compact := strings.Join(parts, "")
-	decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(compact))
-	if err != nil || len(decoded) != generatedCodeBytes {
-		return "", errors.New("pairing code is not valid base32")
-	}
-	reencoded := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(decoded))
-	if reencoded != compact {
-		return "", errors.New("pairing code has invalid trailing bits")
-	}
-	return strings.Join(parts, "-"), nil
+	return string(symbols[:generatedCodeGroupSize]) + "-" + string(symbols[generatedCodeGroupSize:]), nil
 }
 
-// generateCodeFrom encodes 64 bits from a cryptographic random source into
-// lowercase, grouped base32 without discarding entropy.
+// generateCodeFrom uses bounded rejection sampling to produce six uniform
+// base-30 symbols without modulo bias.
 func generateCodeFrom(random io.Reader) (string, error) {
-	raw := make([]byte, generatedCodeBytes)
-	if _, err := io.ReadFull(random, raw); err != nil {
-		return "", fmt.Errorf("read pairing-code randomness: %w", err)
+	encoded := make([]byte, 0, generatedCodeSymbols)
+	draw := []byte{0}
+	for attempts := 0; len(encoded) < generatedCodeSymbols && attempts < generatedCodeMaxRandomDraws; attempts++ {
+		if _, err := io.ReadFull(random, draw); err != nil {
+			return "", fmt.Errorf("read pairing-code randomness: %w", err)
+		}
+		value := int(draw[0])
+		if value >= generatedCodeRejectionLimit {
+			continue
+		}
+		encoded = append(encoded, generatedCodeAlphabet[value%generatedCodeAlphabetSize])
 	}
-	encoded := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw))
-	groups := make([]string, 0, generatedCodeGroups)
-	for range generatedCodePrefixGroups {
-		groups = append(groups, encoded[:generatedCodeGroupSize])
-		encoded = encoded[generatedCodeGroupSize:]
+	if len(encoded) != generatedCodeSymbols {
+		return "", errors.New("pairing-code random source did not yield usable values")
 	}
-	groups = append(groups, encoded)
-	return NormalizeCode(strings.Join(groups, "-"))
+	return NormalizeCode(string(encoded))
 }
 
 func expectSelf(r *bufio.Reader) (*SelfInfo, error) {

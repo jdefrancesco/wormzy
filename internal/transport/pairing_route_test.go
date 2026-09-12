@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-const testPairingCode = "mfrg-gzdf-mztwq"
+const testPairingCode = "mfrg-gz"
 
 // TestDeriveMailboxSessionIDHidesPairingCode verifies routing is stable,
 // domain-separated, and does not carry the human secret verbatim.
@@ -44,7 +44,7 @@ func TestValidMailboxSessionIDRejectsNoncanonicalEncoding(t *testing.T) {
 	}
 }
 
-// TestNormalizeConfiguredPairingCodeRequiresCurrentFormat verifies weak legacy
+// TestNormalizeConfiguredPairingCodeRequiresCurrentFormat verifies legacy
 // codes are rejected before any value reaches the mailbox.
 func TestNormalizeConfiguredPairingCodeRequiresCurrentFormat(t *testing.T) {
 	if _, err := normalizeConfiguredPairingCode("recv", "quick-code"); err == nil {

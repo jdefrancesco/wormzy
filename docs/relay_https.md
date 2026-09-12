@@ -13,11 +13,13 @@ The file data path is separate:
 The official service is trusted for availability, metadata handling, and the
 mailbox's active role in pairing, not for routine file decryption: pairing
 secrets are generated on the clients and an honestly forwarded transfer keeps
-file bytes end-to-end encrypted. Generated secrets contain 64 random bits and
-use the `xxxx-xxxx-xxxxx` display format. The mailbox receives a deterministic
+file bytes end-to-end encrypted. Generated secrets contain six uniform symbols
+from a 30-character alphabet (about 29.4 bits) and use the `xxxx-xx` display
+format. The mailbox receives a deterministic
 session identifier derived from that secret, so an operator or database reader
-can use the identifier to test pairing-code guesses offline. The identifier is
-opaque, not password-hardened. An operator of a custom endpoint can also observe
+can use the identifier to test pairing-code guesses offline. Exhausting the
+compact generated-code space is practical for an endpoint operator; the
+identifier is opaque, not password-hardened. An operator of a custom endpoint can also observe
 client IP addresses, timing, candidate metadata, and transfer activity; delay,
 drop, or reorder control traffic; and attempt active impersonation if it
 recovers the code. Only use a custom endpoint when that trust tradeoff is

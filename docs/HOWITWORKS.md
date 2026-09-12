@@ -12,7 +12,7 @@ This document is the explanation that is sort of *"just beyond TLDR"*
 
 2. **Pairing, Discovery & PAKE**
 
-   `internal/transport.Run` creates or validates the pairing secret locally and displays it immediately. A generated code starts as eight cryptographically random bytes (64 bits), which Wormzy encodes as 13 unpadded lowercase RFC 4648 base32 characters and groups as `xxxx-xxxx-xxxxx`. Wormzy does not send the raw code as its mailbox lookup value; it derives an opaque, domain-separated SHA-256 session identifier and creates a separate random capability for each role. Because that identifier is deterministic, however, anyone who obtains it can verify pairing-code guesses offline. Normal client logs show only a truncated identifier alias, but that alias is still a partial verifier, so diagnostic logs should be treated as sensitive. Neither representation is a password-hardening mechanism. The HTTP mailbox stores only capability verifiers and requires the raw capability over HTTPS for later operations. Wormzy then binds the legacy UDP socket, probes a shuffled STUN server list sequentially on that socket, and publishes its initial local and reflexive candidates. CPace runs over the mailbox to derive the shared secret before either peer trusts refreshed candidate metadata. The Redis-backed mailbox lives in managed Redis; the HTTP proxy (`cmd/mailbox`, `internal/transport/mailbox_http_server.go`) exposes the versioned mailbox API so production clients never talk to Redis directly.
+   `internal/transport.Run` creates or validates the pairing secret locally and displays it immediately. A generated code contains six uniform symbols selected with rejection sampling from a 30-character alphabet, giving 729 million possibilities (about 29.4 bits), and is grouped as `xxxx-xx`. The alphabet omits `0`, `1`, `i`, `l`, `o`, and `u`; input is case-insensitive and may omit the hyphen. Wormzy does not send the raw code as its mailbox lookup value; it derives an opaque, domain-separated SHA-256 session identifier and creates a separate random capability for each role. Because that identifier is deterministic, however, anyone who obtains it can verify pairing-code guesses offline. The compact code is a deliberate usability tradeoff for short-lived, single-transfer sessions and is not intended to resist exhaustive search by a mailbox operator. Normal client logs show only a truncated identifier alias, but that alias is still a partial verifier, so diagnostic logs should be treated as sensitive. Neither representation is a password-hardening mechanism. The HTTP mailbox stores only capability verifiers and requires the raw capability over HTTPS for later operations. Wormzy then binds the legacy UDP socket, probes a shuffled STUN server list sequentially on that socket, and publishes its initial local and reflexive candidates. CPace runs over the mailbox to derive the shared secret before either peer trusts refreshed candidate metadata. The Redis-backed mailbox lives in managed Redis; the HTTP proxy (`cmd/mailbox`, `internal/transport/mailbox_http_server.go`) exposes the versioned mailbox API so production clients never talk to Redis directly.
 
 3. **Progressive NAT Traversal & QUIC**
 
@@ -37,13 +37,20 @@ honest session cannot passively read the Noise-encrypted file or forge PAKE-
 authenticated signaling while the pairing code remains secret. The mailbox's
 deterministic session identifier is nevertheless an offline verifier for code
 guesses, independent of CPace's transcript protections. Fresh Wormzy-generated
-codes provide 64 random bits; human-selected values can be much weaker even if
-they match the syntax. A custom mailbox operator can also see connection and
+codes provide about 29.4 random bits; human-selected values can be much weaker
+even if they match the syntax. A custom mailbox operator can exhaust the
+generated space, and can also see connection and
 candidate metadata, withhold or reorder traffic, deny service, and attempt
 active impersonation if it recovers the code. Treat endpoint overrides as a
 metadata, availability, and active-security trust decision, keep Redis private,
 and deploy protocol-v2 servers before protocol-v2 clients; Wormzy does not
 silently downgrade to the older registration formats.
+
+Each role capability can claim an active code only once. The mailbox retains
+the completed session until its bounded TTL expires so telemetry remains
+available; after expiry, the same code text could identify a completely new
+session with new capabilities. Wormzy generates a fresh code instead of
+deliberately recycling one.
 
 ### NAT Traversal
 

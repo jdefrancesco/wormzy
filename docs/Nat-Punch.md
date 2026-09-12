@@ -31,8 +31,8 @@ Wormzy does not use one UDP socket for every traversal strategy. An opaque,
 deterministic identifier derived from the pairing code and the candidate
 metadata travel through the HTTPS mailbox, not through a UDP rendezvous packet;
 the raw pairing code remains on the clients. Because the identifier can verify
-code guesses offline, use a fresh Wormzy-generated 64-bit code and a trusted
-mailbox. A direct Redis mailbox is available only over loopback or a local Unix
+guesses across the compact 30-symbol, six-character code space offline, use a
+fresh Wormzy-generated code and a trusted mailbox. A direct Redis mailbox is available only over loopback or a local Unix
 socket for development:
 
 - Pion ICE owns its own sockets and first gathers host, server-reflexive, and explicitly configured TURN candidates. Pion then performs the first connectivity checks; a configured TURN candidate may win during this initial attempt.

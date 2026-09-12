@@ -1,7 +1,6 @@
 package rendezvous
 
 import (
-	"encoding/base32"
 	"errors"
 	"net"
 	"regexp"
@@ -9,10 +8,10 @@ import (
 	"testing"
 )
 
-// TestDefaultCodeFormat verifies generated codes preserve 64 bits in the
-// copy-friendly grouped representation.
+// TestDefaultCodeFormat verifies generated codes use six unambiguous symbols
+// drawn uniformly from the 30-symbol human-oriented alphabet.
 func TestDefaultCodeFormat(t *testing.T) {
-	rx := regexp.MustCompile(`^[a-z2-7]{4}-[a-z2-7]{4}-[a-z2-7]{5}$`)
+	rx := regexp.MustCompile(`^[2-9a-hj-km-np-tv-z]{4}-[2-9a-hj-km-np-tv-z]{2}$`)
 	for i := 0; i < 10; i++ {
 		code, err := defaultCode()
 		if err != nil {
@@ -21,15 +20,21 @@ func TestDefaultCodeFormat(t *testing.T) {
 		if !rx.MatchString(code) {
 			t.Fatalf("code %q does not match expected pattern", code)
 		}
-		decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(
-			strings.ToUpper(strings.ReplaceAll(code, "-", "")),
-		)
-		if err != nil {
-			t.Fatalf("decode code %q: %v", code, err)
+		if symbols := len(strings.ReplaceAll(code, "-", "")); symbols != 6 {
+			t.Fatalf("code contains %d symbols; want 6", symbols)
 		}
-		if bits := len(decoded) * 8; bits != 64 {
-			t.Fatalf("decoded code has %d bits; want 64", bits)
-		}
+	}
+}
+
+// TestGenerateCodeFromUsesRejectionSampling verifies deterministic generation
+// covers the full alphabet while discarding bytes that would introduce bias.
+func TestGenerateCodeFromUsesRejectionSampling(t *testing.T) {
+	code, err := generateCodeFrom(strings.NewReader(string([]byte{240, 255, 0, 1, 16, 17, 18, 29})))
+	if err != nil {
+		t.Fatalf("generate deterministic code: %v", err)
+	}
+	if code != "23jk-mz" {
+		t.Fatalf("generated code = %q; want %q", code, "23jk-mz")
 	}
 }
 
@@ -40,6 +45,17 @@ func (failingCodeReader) Read([]byte) (int, error) {
 	return 0, errors.New("random source unavailable")
 }
 
+type rejectedCodeReader struct{}
+
+// Read fills every requested byte with a value outside the unbiased sampling
+// range so bounded rejection behavior can be tested.
+func (rejectedCodeReader) Read(p []byte) (int, error) {
+	for index := range p {
+		p[index] = 255
+	}
+	return len(p), nil
+}
+
 // TestGenerateCodeFromFailsClosed verifies RNG failure never falls back to a
 // predictable timestamp-derived pairing code.
 func TestGenerateCodeFromFailsClosed(t *testing.T) {
@@ -48,24 +64,43 @@ func TestGenerateCodeFromFailsClosed(t *testing.T) {
 	}
 }
 
-// TestNormalizeCodeRejectsWeakOrMalformedInput verifies custom codes cannot
-// silently reduce the pairing secret's entropy.
-func TestNormalizeCodeRejectsWeakOrMalformedInput(t *testing.T) {
-	code, err := generateCodeFrom(strings.NewReader("01234567"))
-	if err != nil {
-		t.Fatalf("generate deterministic code: %v", err)
+// TestGenerateCodeFromBoundsRejectionSampling verifies a broken random source
+// cannot leave code generation spinning forever.
+func TestGenerateCodeFromBoundsRejectionSampling(t *testing.T) {
+	if code, err := generateCodeFrom(rejectedCodeReader{}); err == nil || code != "" {
+		t.Fatalf("generateCodeFrom = %q, %v; want empty code and error", code, err)
 	}
-	upper := strings.ToUpper(code)
-	if got, err := NormalizeCode(upper); err != nil || got != code {
-		t.Fatalf("NormalizeCode(%q) = %q, %v; want %q", upper, got, err, code)
+}
+
+// TestNormalizeCodeAcceptsConvenientInput verifies case and omitted grouping
+// do not prevent two users from pairing.
+func TestNormalizeCodeAcceptsConvenientInput(t *testing.T) {
+	for input, want := range map[string]string{
+		"23jk-mz": "23jk-mz",
+		"23JK-MZ": "23jk-mz",
+		"23jkmz":  "23jk-mz",
+	} {
+		if got, err := NormalizeCode(input); err != nil || got != want {
+			t.Errorf("NormalizeCode(%q) = %q, %v; want %q", input, got, err, want)
+		}
 	}
+}
+
+// TestNormalizeCodeRejectsMalformedOrLegacyInput verifies malformed and
+// incompatible pairing codes fail before any value reaches the mailbox.
+func TestNormalizeCodeRejectsMalformedOrLegacyInput(t *testing.T) {
 	for _, invalid := range []string{
-		"abcd-ef",
+		"abc-def",
 		"abcd-efgh",
-		"abcd-efgh-ijkl",
-		"abcd-efgh-ijklm-nopq",
-		"abcd-efgh-ijkl1",
-		"mfrg-gzdf-mztwr",
+		"mfrg-gzdf-mztwq",
+		"23ik-mz",
+		"23lk-mz",
+		"23ok-mz",
+		"230k-mz",
+		"231k-mz",
+		"23uk-mz",
+		"23_k-mz",
+		"abcd-e",
 	} {
 		if _, err := NormalizeCode(invalid); err == nil {
 			t.Fatalf("NormalizeCode accepted %q", invalid)
@@ -76,13 +111,28 @@ func TestNormalizeCodeRejectsWeakOrMalformedInput(t *testing.T) {
 // TestNormalizeCodeExplainsVersionCutover gives mixed-version peers actionable
 // guidance instead of reporting only a syntax mismatch.
 func TestNormalizeCodeExplainsVersionCutover(t *testing.T) {
-	_, err := NormalizeCode("abcd-efgh")
+	_, err := NormalizeCode("mfrg-gzdf-mztwq")
 	if err == nil {
-		t.Fatal("NormalizeCode accepted the prior two-group format")
+		t.Fatal("NormalizeCode accepted the prior 64-bit format")
 	}
 	for _, expected := range []string{generatedCodeFormat, "update both Wormzy clients"} {
 		if !strings.Contains(err.Error(), expected) {
 			t.Fatalf("NormalizeCode error %q does not contain %q", err, expected)
+		}
+	}
+}
+
+// TestCodeTextPatternMatchesOnlyWholeCodes verifies short-code redaction does
+// not tear code-shaped substrings out of ordinary diagnostic words.
+func TestCodeTextPatternMatchesOnlyWholeCodes(t *testing.T) {
+	for _, code := range []string{"23jk-mz", "23JK-MZ"} {
+		if !CodeTextPattern.MatchString("code=" + code) {
+			t.Errorf("CodeTextPattern did not match %q", code)
+		}
+	}
+	for _, ordinary := range []string{"direct-race", "prefix23jk-mzsuffix", "mfrg-gzdf-mztwq"} {
+		if CodeTextPattern.MatchString(ordinary) {
+			t.Errorf("CodeTextPattern matched ordinary text %q", ordinary)
 		}
 	}
 }
