@@ -84,7 +84,6 @@ type rendezvousSession struct {
 	Receiver    *sessionPeer             `json:"receiver,omitempty"`
 	Pending     map[string][]msgPt       `json:"pending,omitempty"`
 	NextSideID  uint32                   `json:"next_side_id"`
-	Alias       string                   `json:"alias,omitempty"`
 	Stats       *transferStats           `json:"stats,omitempty"`
 	StatsByRole map[string]transferStats `json:"stats_by_role,omitempty"`
 }
@@ -134,14 +133,12 @@ func newSession(code string, ttl time.Duration) *rendezvousSession {
 
 // newSessionAt initializes one opaque rendezvous session at an authoritative creation time.
 func newSessionAt(code string, ttl time.Duration, created time.Time) *rendezvousSession {
-	alias := mailboxSessionAlias(code)
 	return &rendezvousSession{
 		Code:        code,
 		CreatedUnix: created.Unix(),
 		TTLSeconds:  int64(ttl / time.Second),
 		Pending:     make(map[string][]msgPt),
 		NextSideID:  1,
-		Alias:       alias,
 	}
 }
 

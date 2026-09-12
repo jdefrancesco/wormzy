@@ -199,11 +199,11 @@ func TestParseCLI_LogsSharedFlag(t *testing.T) {
 // TestParseCLI_SendProvidedCode verifies a preselected short pairing code is
 // preserved for the transfer layer to normalize and validate.
 func TestParseCLI_SendProvidedCode(t *testing.T) {
-	opt, err := parseCLI([]string{"send", "payload.bin", "--code", "mfrg-gz"})
+	opt, err := parseCLI([]string{"send", "payload.bin", "--code", "mfr-ggz"})
 	if err != nil {
 		t.Fatalf("parse send: %v", err)
 	}
-	if opt.Code != "mfrg-gz" {
+	if opt.Code != "mfr-ggz" {
 		t.Fatalf("send code = %q; want preselected A/B trial code", opt.Code)
 	}
 }
@@ -266,9 +266,9 @@ func TestHeadlessReporter_PairingCodeOnce(t *testing.T) {
 func TestFileReporter_RedactsPairingCode(t *testing.T) {
 	var output bytes.Buffer
 	reporter := newFileReporter(&output)
-	reporter.Stage(transport.StageRendezvous, transport.StageStateRunning, "code "+"mfrg-gz")
+	reporter.Stage(transport.StageRendezvous, transport.StageStateRunning, "code "+"mfr-ggz")
 
-	if strings.Contains(output.String(), "mfrg-gz") {
+	if strings.Contains(output.String(), "mfr-ggz") {
 		t.Fatalf("file reporter exposed pairing code: %s", output.String())
 	}
 	if !strings.Contains(output.String(), "code [redacted]") {

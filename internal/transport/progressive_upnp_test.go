@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -75,6 +76,7 @@ func (m *progressiveTestMailbox) Close() error { return nil }
 type orderedReporter struct {
 	mu     sync.Mutex
 	events []string
+	logs   []string
 }
 
 // record appends one synthetic ordering event under the reporter lock.
@@ -84,8 +86,12 @@ func (r *orderedReporter) record(event string) {
 	r.events = append(r.events, event)
 }
 
-// Logf is a no-op for ordering tests.
-func (r *orderedReporter) Logf(string, ...interface{}) {}
+// Logf records diagnostic output separately from user-visible stage events.
+func (r *orderedReporter) Logf(format string, args ...interface{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logs = append(r.logs, fmt.Sprintf(format, args...))
+}
 
 // Stage records transport stage details for ordering tests.
 func (r *orderedReporter) Stage(_ Stage, _ StageState, detail string) {
@@ -113,6 +119,11 @@ func TestClaimPairingCode_ReportsAssignedCode(t *testing.T) {
 	}
 	if !reflect.DeepEqual(reporter.events, []string{"code " + testPairingCode, "mailbox claim"}) {
 		t.Fatalf("stage details = %v", reporter.events)
+	}
+	for _, line := range reporter.logs {
+		if strings.Contains(line, wantSessionID) || strings.Contains(line, testPairingCode) {
+			t.Fatalf("claim log exposed pairing route or code: %q", line)
+		}
 	}
 }
 

@@ -45,19 +45,6 @@ func validMailboxSessionID(sessionID string) bool {
 	return err == nil && len(raw) == mailboxSessionIDBytes && base64.RawURLEncoding.EncodeToString(raw) == encoded
 }
 
-// mailboxSessionAlias returns a short non-secret label suitable for operator
-// diagnostics without exposing the full bearer-like routing identifier.
-func mailboxSessionAlias(sessionID string) string {
-	if !validMailboxSessionID(sessionID) {
-		return "unknown"
-	}
-	encoded := strings.TrimPrefix(sessionID, mailboxSessionIDPrefix)
-	if len(encoded) < 8 {
-		return "unknown"
-	}
-	return "m-" + encoded[:8]
-}
-
 // normalizeConfiguredPairingCode validates a supplied code or creates a fresh
 // sender secret when no code was requested.
 func normalizeConfiguredPairingCode(mode, configured string) (string, error) {

@@ -472,7 +472,7 @@ func snapshotFromSession(sess *rendezvousSession, now time.Time) SessionSnapshot
 	}
 	snap := SessionSnapshot{
 		ID:           sess.Code,
-		Code:         mailboxSessionAlias(sess.Code),
+		Code:         sessionDisplayAlias(sess),
 		CreatedAt:    created,
 		ExpiresAt:    expires,
 		TTLRemaining: remaining,
@@ -508,6 +508,15 @@ func snapshotFromSession(sess *rendezvousSession, now time.Time) SessionSnapshot
 		snap.UpdatedAt = created
 	}
 	return snap
+}
+
+// sessionDisplayAlias combines the opaque session ID with the sender's random
+// capability verifier to derive a session-specific operator label.
+func sessionDisplayAlias(sess *rendezvousSession) string {
+	if sess == nil || sess.Sender == nil {
+		return "unknown"
+	}
+	return mailboxDiagnosticAlias(sess.Code, sess.Sender.CapabilityHash)
 }
 
 func sessionStateFromPeers(hasSender, hasReceiver bool) string {

@@ -335,13 +335,19 @@ func TestSessionStoreClaimIsIdempotentForSameVerifier(t *testing.T) {
 
 // TestSessionStoreUsesOpaqueIDAndDisplayAlias verifies storage identity remains separate from dashboard text.
 func TestSessionStoreUsesOpaqueIDAndDisplayAlias(t *testing.T) {
+	store, _, _ := newSessionStoreTestHarness(t, time.Minute)
 	code := sessionStoreTestID(0x48)
-	session := newSession(code, time.Minute)
+	capabilityHash := sessionStoreTestCapability(t, 0x49)
+	session, err := store.registerSender(context.Background(), code, capabilityHash)
+	if err != nil {
+		t.Fatalf("register sender: %v", err)
+	}
 	if session.Code != code {
 		t.Fatalf("storage code = %q; want %q", session.Code, code)
 	}
-	if session.Alias != mailboxSessionAlias(code) || session.Alias == code {
-		t.Fatalf("display alias = %q; want %q distinct from storage ID", session.Alias, mailboxSessionAlias(code))
+	wantAlias := mailboxDiagnosticAlias(code, capabilityHash)
+	if got := sessionDisplayAlias(session); got != wantAlias || got == code {
+		t.Fatalf("display alias = %q; want %q distinct from storage ID", got, wantAlias)
 	}
 }
 

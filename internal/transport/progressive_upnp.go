@@ -78,7 +78,7 @@ func claimPairingCode(ctx context.Context, cfg Config, rep Reporter, mb mailbox)
 	}
 	if rep != nil {
 		rep.Stage(StageRendezvous, StageStateRunning, "code "+code)
-		rep.Logf("rendezvous claiming opaque session %s", mailboxSessionAlias(sessionID))
+		rep.Logf("rendezvous claiming opaque session")
 	}
 	claimedID, err := mb.Claim(ctx, sessionID)
 	if err != nil {
@@ -88,7 +88,7 @@ func claimPairingCode(ctx context.Context, cfg Config, rep Reporter, mb mailbox)
 		return "", errors.New("rendezvous returned an unexpected session identifier")
 	}
 	if rep != nil {
-		rep.Logf("rendezvous claimed opaque session %s", mailboxSessionAlias(sessionID))
+		rep.Logf("rendezvous claimed opaque session")
 	}
 	return code, nil
 }

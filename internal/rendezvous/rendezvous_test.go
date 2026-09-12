@@ -11,7 +11,7 @@ import (
 // TestDefaultCodeFormat verifies generated codes use six unambiguous symbols
 // drawn uniformly from the 30-symbol human-oriented alphabet.
 func TestDefaultCodeFormat(t *testing.T) {
-	rx := regexp.MustCompile(`^[2-9a-hj-km-np-tv-z]{4}-[2-9a-hj-km-np-tv-z]{2}$`)
+	rx := regexp.MustCompile(`^[2-9a-hj-km-np-tv-z]{3}-[2-9a-hj-km-np-tv-z]{3}$`)
 	for i := 0; i < 10; i++ {
 		code, err := defaultCode()
 		if err != nil {
@@ -27,14 +27,52 @@ func TestDefaultCodeFormat(t *testing.T) {
 }
 
 // TestGenerateCodeFromUsesRejectionSampling verifies deterministic generation
-// covers the full alphabet while discarding bytes that would introduce bias.
+// discards bytes outside the unbiased sampling range.
 func TestGenerateCodeFromUsesRejectionSampling(t *testing.T) {
 	code, err := generateCodeFrom(strings.NewReader(string([]byte{240, 255, 0, 1, 16, 17, 18, 29})))
 	if err != nil {
 		t.Fatalf("generate deterministic code: %v", err)
 	}
-	if code != "23jk-mz" {
-		t.Fatalf("generated code = %q; want %q", code, "23jk-mz")
+	if code != "23j-kmz" {
+		t.Fatalf("generated code = %q; want %q", code, "23j-kmz")
+	}
+}
+
+// TestGeneratedCodeAlphabetIsUnambiguous verifies the generator and redactor
+// share a unique, lowercase ASCII alphabet without commonly confused glyphs.
+func TestGeneratedCodeAlphabetIsUnambiguous(t *testing.T) {
+	if len(generatedCodeAlphabet) != 30 {
+		t.Fatalf("alphabet size = %d; want 30", len(generatedCodeAlphabet))
+	}
+	seen := make(map[byte]bool, len(generatedCodeAlphabet))
+	for index := range len(generatedCodeAlphabet) {
+		symbol := generatedCodeAlphabet[index]
+		isDigit := symbol >= '2' && symbol <= '9'
+		isLowercase := symbol >= 'a' && symbol <= 'z'
+		if symbol > 0x7f || !isDigit && !isLowercase {
+			t.Fatalf("alphabet contains noncanonical symbol %q", symbol)
+		}
+		if strings.ContainsRune("01ilou", rune(symbol)) {
+			t.Fatalf("alphabet contains ambiguous symbol %q", symbol)
+		}
+		if seen[symbol] {
+			t.Fatalf("alphabet contains duplicate symbol %q", symbol)
+		}
+		seen[symbol] = true
+
+		random := strings.NewReader(strings.Repeat(string([]byte{byte(index)}), generatedCodeSymbols))
+		code, err := generateCodeFrom(random)
+		if err != nil {
+			t.Fatalf("generate code for alphabet index %d: %v", index, err)
+		}
+		want := strings.Repeat(string(symbol), generatedCodeGroupSize) + "-" +
+			strings.Repeat(string(symbol), generatedCodeFinalGroupSize)
+		if code != want {
+			t.Fatalf("generated code for alphabet index %d = %q; want %q", index, code, want)
+		}
+		if !CodeTextPattern.MatchString(code) {
+			t.Fatalf("redactor pattern does not match generated symbol %q", symbol)
+		}
 	}
 }
 
@@ -72,13 +110,12 @@ func TestGenerateCodeFromBoundsRejectionSampling(t *testing.T) {
 	}
 }
 
-// TestNormalizeCodeAcceptsConvenientInput verifies case and omitted grouping
-// do not prevent two users from pairing.
+// TestNormalizeCodeAcceptsConvenientInput verifies ASCII letter case does not
+// prevent two users from pairing when the required grouping is present.
 func TestNormalizeCodeAcceptsConvenientInput(t *testing.T) {
 	for input, want := range map[string]string{
-		"23jk-mz": "23jk-mz",
-		"23JK-MZ": "23jk-mz",
-		"23jkmz":  "23jk-mz",
+		"23j-kmz": "23j-kmz",
+		"23J-KMZ": "23j-kmz",
 	} {
 		if got, err := NormalizeCode(input); err != nil || got != want {
 			t.Errorf("NormalizeCode(%q) = %q, %v; want %q", input, got, err, want)
@@ -90,17 +127,19 @@ func TestNormalizeCodeAcceptsConvenientInput(t *testing.T) {
 // incompatible pairing codes fail before any value reaches the mailbox.
 func TestNormalizeCodeRejectsMalformedOrLegacyInput(t *testing.T) {
 	for _, invalid := range []string{
-		"abc-def",
+		"abcd-ef",
 		"abcd-efgh",
 		"mfrg-gzdf-mztwq",
-		"23ik-mz",
-		"23lk-mz",
-		"23ok-mz",
-		"230k-mz",
-		"231k-mz",
-		"23uk-mz",
-		"23_k-mz",
-		"abcd-e",
+		"23i-kmz",
+		"23l-kmz",
+		"23o-kmz",
+		"230-kmz",
+		"231-kmz",
+		"23u-kmz",
+		"23_-kmz",
+		"23jkmz",
+		"23jk-mz",
+		"23j-Kmz",
 	} {
 		if _, err := NormalizeCode(invalid); err == nil {
 			t.Fatalf("NormalizeCode accepted %q", invalid)
@@ -125,12 +164,12 @@ func TestNormalizeCodeExplainsVersionCutover(t *testing.T) {
 // TestCodeTextPatternMatchesOnlyWholeCodes verifies short-code redaction does
 // not tear code-shaped substrings out of ordinary diagnostic words.
 func TestCodeTextPatternMatchesOnlyWholeCodes(t *testing.T) {
-	for _, code := range []string{"23jk-mz", "23JK-MZ"} {
+	for _, code := range []string{"23j-kmz", "23J-KMZ"} {
 		if !CodeTextPattern.MatchString("code=" + code) {
 			t.Errorf("CodeTextPattern did not match %q", code)
 		}
 	}
-	for _, ordinary := range []string{"direct-race", "prefix23jk-mzsuffix", "mfrg-gzdf-mztwq"} {
+	for _, ordinary := range []string{"direct-race", "send-ns", "recv-ns", "prefix23j-kmzsuffix", "23jkmz", "abcd-ef", "mfrg-gzdf-mztwq"} {
 		if CodeTextPattern.MatchString(ordinary) {
 			t.Errorf("CodeTextPattern matched ordinary text %q", ordinary)
 		}

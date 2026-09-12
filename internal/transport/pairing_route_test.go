@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-const testPairingCode = "mfrg-gz"
+const testPairingCode = "mfr-ggz"
 
 // TestDeriveMailboxSessionIDHidesPairingCode verifies routing is stable,
 // domain-separated, and does not carry the human secret verbatim.
@@ -26,9 +26,6 @@ func TestDeriveMailboxSessionIDHidesPairingCode(t *testing.T) {
 	}
 	if strings.Contains(first, strings.ReplaceAll(testPairingCode, "-", "")) {
 		t.Fatalf("derived ID exposes pairing code: %q", first)
-	}
-	if alias := mailboxSessionAlias(first); !strings.HasPrefix(alias, "m-") || len(alias) != 10 {
-		t.Fatalf("session alias = %q; want m- plus eight characters", alias)
 	}
 }
 

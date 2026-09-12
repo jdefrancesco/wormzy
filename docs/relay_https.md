@@ -14,8 +14,9 @@ The official service is trusted for availability, metadata handling, and the
 mailbox's active role in pairing, not for routine file decryption: pairing
 secrets are generated on the clients and an honestly forwarded transfer keeps
 file bytes end-to-end encrypted. Generated secrets contain six uniform symbols
-from a 30-character alphabet (about 29.4 bits) and use the `xxxx-xx` display
-format. The mailbox receives a deterministic
+from a 30-character alphabet (about 29.4 bits) and use the `xxx-xxx` display
+format. Pairing-code input accepts uppercase or lowercase ASCII and requires the
+hyphen. The mailbox receives a deterministic
 session identifier derived from that secret, so an operator or database reader
 can use the identifier to test pairing-code guesses offline. Exhausting the
 compact generated-code space is practical for an endpoint operator; the

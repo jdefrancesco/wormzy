@@ -38,6 +38,46 @@ func TestGenerateMailboxCapability(t *testing.T) {
 	}
 }
 
+// TestMailboxDiagnosticAliasUsesSessionAndRandomVerifier verifies dashboard
+// labels combine session identity with independent capability material.
+func TestMailboxDiagnosticAliasUsesSessionAndRandomVerifier(t *testing.T) {
+	_, first, err := generateMailboxCapability(bytes.NewReader(bytes.Repeat([]byte{0x31}, mailboxCapabilitySize)))
+	if err != nil {
+		t.Fatalf("generate first capability: %v", err)
+	}
+	_, second, err := generateMailboxCapability(bytes.NewReader(bytes.Repeat([]byte{0x32}, mailboxCapabilitySize)))
+	if err != nil {
+		t.Fatalf("generate second capability: %v", err)
+	}
+	firstSession := mailboxSessionIDPrefix + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x41}, mailboxSessionIDBytes))
+	secondSession := mailboxSessionIDPrefix + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, mailboxSessionIDBytes))
+	firstAlias := mailboxDiagnosticAlias(firstSession, first)
+	secondAlias := mailboxDiagnosticAlias(firstSession, second)
+	if !strings.HasPrefix(firstAlias, "m-") || len(firstAlias) != 10 {
+		t.Fatalf("first alias = %q; want m- plus eight characters", firstAlias)
+	}
+	if firstAlias == "m-"+first[:mailboxDiagnosticAliasSize] {
+		t.Fatalf("alias %q directly exposes a client-chosen verifier prefix", firstAlias)
+	}
+	if firstAlias == secondAlias {
+		t.Fatalf("independent capability aliases are equal: %q", firstAlias)
+	}
+	if reused := mailboxDiagnosticAlias(secondSession, first); reused == firstAlias {
+		t.Fatalf("reused capability produced duplicate aliases across sessions: %q", reused)
+	}
+	for _, test := range []struct {
+		session  string
+		verifier string
+	}{
+		{session: "invalid", verifier: first},
+		{session: firstSession, verifier: "invalid"},
+	} {
+		if got := mailboxDiagnosticAlias(test.session, test.verifier); got != "unknown" {
+			t.Fatalf("invalid diagnostic alias = %q; want unknown", got)
+		}
+	}
+}
+
 // TestGenerateMailboxCapabilityFailsClosed verifies entropy failures never yield partial credentials.
 func TestGenerateMailboxCapabilityFailsClosed(t *testing.T) {
 	raw, verifier, err := generateMailboxCapability(iotest.ErrReader(errors.New("entropy unavailable")))

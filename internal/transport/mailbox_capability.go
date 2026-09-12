@@ -14,6 +14,8 @@ import (
 const (
 	mailboxCapabilitySize        = 32
 	mailboxCapabilityEncodedSize = 43
+	mailboxDiagnosticAliasSize   = 8
+	mailboxDiagnosticAliasLabel  = "wormzy-mailbox-dashboard-alias-v1"
 )
 
 var (
@@ -63,6 +65,17 @@ func validateMailboxCapabilityVerifier(verifier string) error {
 		return errMailboxUnavailable
 	}
 	return nil
+}
+
+// mailboxDiagnosticAlias returns a short dashboard label that combines an
+// opaque session ID with random sender capability material.
+func mailboxDiagnosticAlias(sessionID, verifier string) string {
+	if !validMailboxSessionID(sessionID) || validateMailboxCapabilityVerifier(verifier) != nil {
+		return "unknown"
+	}
+	digest := sha256.Sum256([]byte(mailboxDiagnosticAliasLabel + ":" + sessionID + ":" + verifier))
+	encoded := base64.RawURLEncoding.EncodeToString(digest[:])
+	return "m-" + encoded[:mailboxDiagnosticAliasSize]
 }
 
 // mailboxCapabilityVerifierEqual compares canonical verifiers without data-dependent equality timing.

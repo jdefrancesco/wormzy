@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly PAIRING_CODE_PATTERN='^[2-9a-hj-km-np-tv-z]{4}-[2-9a-hj-km-np-tv-z]{2}$'
+readonly PAIRING_CODE_PATTERN='^[23456789ABCDEFGHJKMNPQRSTVWXYZabcdefghjkmnpqrstvwxyz]{3}-[23456789ABCDEFGHJKMNPQRSTVWXYZabcdefghjkmnpqrstvwxyz]{3}$'
 
 usage() {
   cat <<'USAGE'
@@ -66,7 +66,7 @@ generate_code() {
   local code
   code="$("$wormzy_bin" code)"
   if [[ ! "$code" =~ $PAIRING_CODE_PATTERN ]]; then
-    die "could not generate a compact trial code in xxxx-xx format"
+    die "could not generate a compact trial code in xxx-xxx format"
   fi
   printf "%s" "$code"
 }
@@ -334,7 +334,7 @@ run_command() {
     [[ "$arm" == "on" || "$arm" == "off" ]] || die "invalid arm in $plan: $arm"
     [[ -n "$code" && -z "$extra" ]] || die "invalid plan row for trial $trial"
     [[ "$code" =~ $PAIRING_CODE_PATTERN ]] ||
-      die "invalid pairing code for trial $trial: expected xxxx-xx"
+      die "invalid pairing code for trial $trial: expected xxx-xxx"
 
     trial_dir="$workdir/trial-$trial"
     mkdir -p "$trial_dir"

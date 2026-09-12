@@ -37,9 +37,9 @@ const (
 	generatedCodeRejectionLimit = 256 - (256 % generatedCodeAlphabetSize)
 	generatedCodeSymbols        = 6
 	generatedCodeMaxRandomDraws = generatedCodeSymbols * 16
-	generatedCodeGroupSize      = 4
+	generatedCodeGroupSize      = 3
 	generatedCodeFinalGroupSize = generatedCodeSymbols - generatedCodeGroupSize
-	generatedCodeFormat         = "xxxx-xx"
+	generatedCodeFormat         = "xxx-xxx"
 )
 
 // Server implements the rendezvous relay responsible for pairing senders and
@@ -343,18 +343,21 @@ func invalidPairingCodeFormatError() error {
 }
 
 // NormalizeCode validates a Wormzy pairing code and returns its canonical
-// lowercase, grouped representation. It accepts an omitted hyphen and rejects
-// visually ambiguous symbols that the generator never emits.
+// lowercase, grouped representation. It requires the grouping hyphen and
+// rejects non-ASCII or visually ambiguous symbols the generator never emits.
 func NormalizeCode(code string) (string, error) {
-	symbols := []rune(strings.ToLower(strings.TrimSpace(code)))
-	switch {
-	case len(symbols) == generatedCodeSymbols:
-	case len(symbols) == generatedCodeSymbols+1 && symbols[generatedCodeGroupSize] == '-':
-		symbols = append(symbols[:generatedCodeGroupSize], symbols[generatedCodeGroupSize+1:]...)
-	default:
+	grouped := []rune(strings.TrimSpace(code))
+	if len(grouped) != generatedCodeSymbols+1 || grouped[generatedCodeGroupSize] != '-' {
 		return "", invalidPairingCodeFormatError()
 	}
+	symbols := append(grouped[:generatedCodeGroupSize:generatedCodeGroupSize], grouped[generatedCodeGroupSize+1:]...)
 	for index, symbol := range symbols {
+		if symbol >= 'A' && symbol <= 'Z' {
+			symbol += 'a' - 'A'
+		}
+		if symbol > 0x7f {
+			return "", fmt.Errorf("pairing code contains non-ASCII character %q", symbol)
+		}
 		if !strings.ContainsRune(generatedCodeAlphabet, symbol) {
 			return "", fmt.Errorf("pairing code contains invalid character %q", symbol)
 		}
@@ -381,7 +384,8 @@ func generateCodeFrom(random io.Reader) (string, error) {
 	if len(encoded) != generatedCodeSymbols {
 		return "", errors.New("pairing-code random source did not yield usable values")
 	}
-	return NormalizeCode(string(encoded))
+	grouped := string(encoded[:generatedCodeGroupSize]) + "-" + string(encoded[generatedCodeGroupSize:])
+	return NormalizeCode(grouped)
 }
 
 func expectSelf(r *bufio.Reader) (*SelfInfo, error) {

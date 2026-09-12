@@ -26,7 +26,7 @@ scripts/upnp-ab.sh plan --trials-per-arm 20 --output upnp-plan.csv
 ```
 
 Copy `upnp-plan.csv` to the other machine. The plan contains single-use
-pairing codes in the current `xxxx-xx` format and alternates the enabled
+pairing codes in the current `xxx-xxx` format and alternates the enabled
 and disabled arms in an ABBA order to reduce time drift. Do not hand-edit or
 reuse the generated codes.
 

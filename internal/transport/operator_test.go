@@ -154,9 +154,10 @@ func TestMetricsCollector_UsesRedisSessionTTL(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
 	defer client.Close()
 	sessionID := sessionStoreTestID(0x56)
+	capabilityHash := sessionStoreTestCapability(t, 0x57)
 	sess := newSession(sessionID, 10*time.Minute)
 	sess.CreatedUnix = time.Now().Add(-9 * time.Minute).Unix()
-	sess.Sender = &sessionPeer{Role: "send"}
+	sess.Sender = &sessionPeer{Role: "send", CapabilityHash: capabilityHash}
 	payload, err := json.Marshal(sess)
 	if err != nil {
 		t.Fatalf("marshal session: %v", err)
@@ -180,7 +181,7 @@ func TestMetricsCollector_UsesRedisSessionTTL(t *testing.T) {
 	if metrics.Active[0].TTLRemaining < 9*time.Minute {
 		t.Fatalf("TTL remaining = %s; want Redis TTL near 10m", metrics.Active[0].TTLRemaining)
 	}
-	if metrics.Active[0].ID != sessionID || metrics.Active[0].Code != mailboxSessionAlias(sessionID) {
+	if metrics.Active[0].ID != sessionID || metrics.Active[0].Code != mailboxDiagnosticAlias(sessionID, capabilityHash) {
 		t.Fatalf("session identity leaked or lost: %+v", metrics.Active[0])
 	}
 }

@@ -49,14 +49,13 @@ required format.
 
 Current Wormzy-generated codes contain six uniform symbols selected from a
 30-character alphabet, providing 729 million possibilities (about 29.4 bits),
-and are grouped as `xxxx-xx`. The generator omits `0`, `1`, `i`, `l`, `o`, and
+and are grouped as `xxx-xxx`. The generator omits `0`, `1`, `i`, `l`, `o`, and
 `u` so the code stays readable even without a specialized terminal font. Input
-is case-insensitive and may omit the hyphen. This deliberately favors quick
-one-time transcription over resistance to an endpoint operator performing an
-offline exhaustive search. Treat each code as a single-use credential and
-share it through a separate trusted channel. Both transfer peers must run a
-compatible release; older clients reject this format, so upgrade both sides
-together.
+accepts uppercase or lowercase ASCII, and the hyphen is required. This
+deliberately favors quick one-time transcription over resistance to an endpoint
+operator performing an offline exhaustive search. Treat each code as a
+single-use credential and share it through a separate trusted channel. Older
+releases are incompatible with this format, so upgrade both sides together.
 
 The terminal emulator, rather than Wormzy, controls the font. Fira Code and
 Source Code Pro are good monospaced choices, but the generated alphabet does
