@@ -25,9 +25,10 @@ recommended run; ten is useful as a smoke test.
 scripts/upnp-ab.sh plan --trials-per-arm 20 --output upnp-plan.csv
 ```
 
-Copy `upnp-plan.csv` to the other machine. The plan contains high-entropy,
-single-use pairing codes and alternates the enabled and disabled arms in an
-ABBA order to reduce time drift.
+Copy `upnp-plan.csv` to the other machine. The plan contains single-use 64-bit
+pairing codes in the current `xxxx-xxxx-xxxxx` format and alternates the enabled
+and disabled arms in an ABBA order to reduce time drift. Do not hand-edit or
+reuse the generated codes.
 
 ## Run the two endpoints
 

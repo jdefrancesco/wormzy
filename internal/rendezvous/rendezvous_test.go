@@ -3,18 +3,16 @@ package rendezvous
 import (
 	"encoding/base32"
 	"errors"
-	"fmt"
 	"net"
 	"regexp"
 	"strings"
 	"testing"
 )
 
-// TestDefaultCodeFormat verifies generated codes preserve 40 bits in the
+// TestDefaultCodeFormat verifies generated codes preserve 64 bits in the
 // copy-friendly grouped representation.
 func TestDefaultCodeFormat(t *testing.T) {
-	rx := regexp.MustCompile(fmt.Sprintf(`^[a-z2-7]{%d}(?:-[a-z2-7]{%d}){%d}$`,
-		generatedCodeGroupSize, generatedCodeGroupSize, generatedCodeGroups-1))
+	rx := regexp.MustCompile(`^[a-z2-7]{4}-[a-z2-7]{4}-[a-z2-7]{5}$`)
 	for i := 0; i < 10; i++ {
 		code, err := defaultCode()
 		if err != nil {
@@ -29,8 +27,8 @@ func TestDefaultCodeFormat(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode code %q: %v", code, err)
 		}
-		if len(decoded) != generatedCodeBytes {
-			t.Fatalf("decoded code has %d bytes; want %d", len(decoded), generatedCodeBytes)
+		if bits := len(decoded) * 8; bits != 64 {
+			t.Fatalf("decoded code has %d bits; want 64", bits)
 		}
 	}
 }
@@ -51,9 +49,9 @@ func TestGenerateCodeFromFailsClosed(t *testing.T) {
 }
 
 // TestNormalizeCodeRejectsWeakOrMalformedInput verifies custom codes cannot
-// silently reduce the mailbox-hidden PAKE secret's entropy.
+// silently reduce the pairing secret's entropy.
 func TestNormalizeCodeRejectsWeakOrMalformedInput(t *testing.T) {
-	code, err := generateCodeFrom(strings.NewReader("01234"))
+	code, err := generateCodeFrom(strings.NewReader("01234567"))
 	if err != nil {
 		t.Fatalf("generate deterministic code: %v", err)
 	}
@@ -63,11 +61,28 @@ func TestNormalizeCodeRejectsWeakOrMalformedInput(t *testing.T) {
 	}
 	for _, invalid := range []string{
 		"abcd-ef",
+		"abcd-efgh",
 		"abcd-efgh-ijkl",
-		"abcd-efg1",
+		"abcd-efgh-ijklm-nopq",
+		"abcd-efgh-ijkl1",
+		"mfrg-gzdf-mztwr",
 	} {
 		if _, err := NormalizeCode(invalid); err == nil {
 			t.Fatalf("NormalizeCode accepted %q", invalid)
+		}
+	}
+}
+
+// TestNormalizeCodeExplainsVersionCutover gives mixed-version peers actionable
+// guidance instead of reporting only a syntax mismatch.
+func TestNormalizeCodeExplainsVersionCutover(t *testing.T) {
+	_, err := NormalizeCode("abcd-efgh")
+	if err == nil {
+		t.Fatal("NormalizeCode accepted the prior two-group format")
+	}
+	for _, expected := range []string{generatedCodeFormat, "update both Wormzy clients"} {
+		if !strings.Contains(err.Error(), expected) {
+			t.Fatalf("NormalizeCode error %q does not contain %q", err, expected)
 		}
 	}
 }

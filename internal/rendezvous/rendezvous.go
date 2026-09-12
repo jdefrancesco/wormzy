@@ -30,17 +30,16 @@ const (
 	msgPAKE1 = "pake1"
 	msgPAKE2 = "pake2"
 
-	// generatedCodeBytes controls the pairing code's entropy (40 bits). The
-	// code doubles as the CPace PAKE secret, but CPace already defeats
-	// offline guessing from a captured transcript; the mailbox server's
-	// rate limiting and TTL bound the remaining online-guessing risk, so
-	// the code itself only needs to stay inconvenient to guess online.
-	generatedCodeBytes     = 5
-	generatedCodeGroupSize = 4
-	// generatedCodeGroups is derived from generatedCodeBytes/generatedCodeGroupSize:
-	// base32 encodes 5 bits/char, so ceil(bytes*8/5) chars grouped into
-	// generatedCodeGroupSize-character chunks.
-	generatedCodeGroups = ((generatedCodeBytes*8+4)/5 + generatedCodeGroupSize - 1) / generatedCodeGroupSize
+	// generatedCodeBytes controls the pairing code's entropy (64 bits). The
+	// mailbox routing ID is a deterministic hash of this code, so the code must
+	// resist offline guessing independently of the CPace transcript.
+	generatedCodeBytes          = 8
+	generatedCodeGroupSize      = 4
+	generatedCodePrefixGroups   = 2
+	generatedCodeGroups         = generatedCodePrefixGroups + 1
+	generatedCodeEncodedLength  = (generatedCodeBytes*8 + 4) / 5
+	generatedCodeFinalGroupSize = generatedCodeEncodedLength - generatedCodePrefixGroups*generatedCodeGroupSize
+	generatedCodeFormat         = "xxxx-xxxx-xxxxx"
 )
 
 // Server implements the rendezvous relay responsible for pairing senders and
@@ -326,7 +325,6 @@ func defaultCode() (string, error) {
 	return generateCodeFrom(rand.Reader)
 }
 
-// GenerateCode returns a new human-friendly pairing code.
 // GenerateCode returns a cryptographically random canonical pairing code.
 func GenerateCode() (string, error) {
 	return defaultCode()
@@ -335,8 +333,14 @@ func GenerateCode() (string, error) {
 // CodeTextPattern matches a Wormzy pairing code embedded in free text (e.g.
 // for redacting it from logs). It is derived from the same group constants
 // NormalizeCode enforces, so the two never drift apart.
-var CodeTextPattern = regexp.MustCompile(fmt.Sprintf(`(?i)[a-z2-7]{%d}(?:-[a-z2-7]{%d}){%d}`,
-	generatedCodeGroupSize, generatedCodeGroupSize, generatedCodeGroups-1))
+var CodeTextPattern = regexp.MustCompile(fmt.Sprintf(`(?i)[a-z2-7]{%d}(?:-[a-z2-7]{%d}){%d}-[a-z2-7]{%d}`,
+	generatedCodeGroupSize, generatedCodeGroupSize, generatedCodePrefixGroups-1, generatedCodeFinalGroupSize))
+
+// invalidPairingCodeFormatError explains the current format and its
+// mixed-version upgrade requirement.
+func invalidPairingCodeFormatError() error {
+	return fmt.Errorf("pairing code must use the %s format; update both Wormzy clients if the sender shows a different format", generatedCodeFormat)
+}
 
 // NormalizeCode validates a Wormzy pairing code and returns its canonical
 // lowercase, grouped representation.
@@ -344,11 +348,15 @@ func NormalizeCode(code string) (string, error) {
 	code = strings.ToLower(strings.TrimSpace(code))
 	parts := strings.Split(code, "-")
 	if len(parts) != generatedCodeGroups {
-		return "", fmt.Errorf("pairing code must contain %d groups of %d characters", generatedCodeGroups, generatedCodeGroupSize)
+		return "", invalidPairingCodeFormatError()
 	}
-	for _, part := range parts {
-		if len(part) != generatedCodeGroupSize {
-			return "", fmt.Errorf("pairing code groups must contain %d characters", generatedCodeGroupSize)
+	for index, part := range parts {
+		expectedSize := generatedCodeGroupSize
+		if index == generatedCodeGroups-1 {
+			expectedSize = generatedCodeFinalGroupSize
+		}
+		if len(part) != expectedSize {
+			return "", invalidPairingCodeFormatError()
 		}
 	}
 	compact := strings.Join(parts, "")
@@ -363,7 +371,7 @@ func NormalizeCode(code string) (string, error) {
 	return strings.Join(parts, "-"), nil
 }
 
-// generateCodeFrom encodes 96 bits from a cryptographic random source into
+// generateCodeFrom encodes 64 bits from a cryptographic random source into
 // lowercase, grouped base32 without discarding entropy.
 func generateCodeFrom(random io.Reader) (string, error) {
 	raw := make([]byte, generatedCodeBytes)
@@ -371,15 +379,12 @@ func generateCodeFrom(random io.Reader) (string, error) {
 		return "", fmt.Errorf("read pairing-code randomness: %w", err)
 	}
 	encoded := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw))
-	groups := make([]string, 0, (len(encoded)+generatedCodeGroupSize-1)/generatedCodeGroupSize)
-	for len(encoded) > 0 {
-		take := generatedCodeGroupSize
-		if len(encoded) < take {
-			take = len(encoded)
-		}
-		groups = append(groups, encoded[:take])
-		encoded = encoded[take:]
+	groups := make([]string, 0, generatedCodeGroups)
+	for range generatedCodePrefixGroups {
+		groups = append(groups, encoded[:generatedCodeGroupSize])
+		encoded = encoded[generatedCodeGroupSize:]
 	}
+	groups = append(groups, encoded)
 	return NormalizeCode(strings.Join(groups, "-"))
 }
 

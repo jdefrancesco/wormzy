@@ -42,9 +42,17 @@ Verify the installed release:
 wormzy version
 ```
 
-For automation that needs to preselect a strong code, run `wormzy code` and
-pass its single-line output to `wormzy send --code`. Hand-constructed codes may
-have far less entropy even when they match the required format.
+For automation that needs to preselect a fresh generated code, run
+`wormzy code` and pass its single-line output to `wormzy send --code`.
+Hand-constructed codes may have far less entropy even when they match the
+required format.
+
+Current Wormzy-generated codes contain eight cryptographically random bytes
+(64 bits), encoded as unpadded lowercase RFC 4648 base32 and grouped as
+`xxxx-xxxx-xxxxx`. The hyphens are only for readability. Treat each code as a
+single-use credential and share it through a separate trusted channel. Both
+transfer peers must run a compatible release; older clients reject this format,
+so upgrade both sides together.
 
 Go installs the binary into `GOBIN` when configured, or into
 `$(go env GOPATH)/bin` otherwise. Ensure that directory is on your `PATH` if
@@ -129,13 +137,19 @@ loopback development endpoints. Direct Redis mailbox connections are likewise
 restricted to loopback addresses or local Unix sockets for development; remote
 clients must use the HTTPS mailbox API.
 
-The pairing secret is generated locally; current clients send the mailbox only
-an opaque session identifier and per-role capability proof. File contents stay
-end-to-end encrypted even on the fallback relay. A custom mailbox/relay can
-still observe connection metadata (such as IP addresses, timing, and transfer
-activity), delay or suppress pairing messages, or deny service. Only configure
-an endpoint whose operator you trust with that metadata, and use Wormzy-
-generated codes rather than hand-constructed ones.
+The pairing secret is generated locally; current clients send the mailbox an
+opaque, deterministic session identifier instead of the raw code, plus a
+per-role capability proof. That identifier hides the code from casual
+inspection, but it also lets anyone who obtains the identifier test pairing-
+code guesses offline. A generated 64-bit code makes exhaustive guessing much
+more expensive than a human-selected code, but it does not make a malicious
+custom mailbox harmless. File contents remain end-to-end encrypted during an
+ordinary direct or relayed transfer. A custom mailbox or relay can still
+observe connection metadata (such as IP addresses, timing, and transfer
+activity), delay or suppress traffic, or deny service; a mailbox that obtains
+the deterministic identifier can additionally try to recover weak codes for
+an active impersonation attempt. Only configure an endpoint whose operator you
+trust with that access, and use fresh Wormzy-generated codes.
 
 For a custom HTTPS mailbox, `--relay-pin` can add a certificate public-key
 pin. Its value is standard padded base64 of

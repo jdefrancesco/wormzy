@@ -10,13 +10,19 @@ The file data path is separate:
 - direct path: UDP/QUIC peer-to-peer
 - fallback path: `cmd/relay` on UDP/3478 forwarding encrypted QUIC streams
 
-The official service is trusted for availability and metadata handling, not
-for file confidentiality: pairing secrets are generated on the clients and
-file bytes remain end-to-end encrypted. An operator of a custom endpoint can
-observe client IP addresses, timing, candidate metadata, and transfer activity,
-and can delay, drop, or reorder control traffic. Only use a custom endpoint
-when that metadata/availability tradeoff is acceptable. Keep Redis private;
-production clients must use the HTTPS mailbox API rather than direct Redis
+The official service is trusted for availability, metadata handling, and the
+mailbox's active role in pairing, not for routine file decryption: pairing
+secrets are generated on the clients and an honestly forwarded transfer keeps
+file bytes end-to-end encrypted. Generated secrets contain 64 random bits and
+use the `xxxx-xxxx-xxxxx` display format. The mailbox receives a deterministic
+session identifier derived from that secret, so an operator or database reader
+can use the identifier to test pairing-code guesses offline. The identifier is
+opaque, not password-hardened. An operator of a custom endpoint can also observe
+client IP addresses, timing, candidate metadata, and transfer activity; delay,
+drop, or reorder control traffic; and attempt active impersonation if it
+recovers the code. Only use a custom endpoint when that trust tradeoff is
+acceptable, always use a fresh Wormzy-generated code, and keep Redis private.
+Production clients must use the HTTPS mailbox API rather than direct Redis
 credentials.
 Mailbox rate-limit keys use SHA-256 identifiers so raw client addresses do not
 appear in Redis keys, but this is pseudonymization rather than IP anonymity: an

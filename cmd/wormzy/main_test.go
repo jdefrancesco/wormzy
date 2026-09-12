@@ -197,11 +197,11 @@ func TestParseCLI_LogsSharedFlag(t *testing.T) {
 }
 
 func TestParseCLI_SendProvidedCode(t *testing.T) {
-	opt, err := parseCLI([]string{"send", "payload.bin", "--code", "gayt-emzu-gu3d-oobz-mfra"})
+	opt, err := parseCLI([]string{"send", "payload.bin", "--code", "mfrg-gzdf-mztwq"})
 	if err != nil {
 		t.Fatalf("parse send: %v", err)
 	}
-	if opt.Code != "gayt-emzu-gu3d-oobz-mfra" {
+	if opt.Code != "mfrg-gzdf-mztwq" {
 		t.Fatalf("send code = %q; want preselected A/B trial code", opt.Code)
 	}
 }
@@ -264,9 +264,9 @@ func TestHeadlessReporter_PairingCodeOnce(t *testing.T) {
 func TestFileReporter_RedactsPairingCode(t *testing.T) {
 	var output bytes.Buffer
 	reporter := newFileReporter(&output)
-	reporter.Stage(transport.StageRendezvous, transport.StageStateRunning, "code "+"gayt-emzu-gu3d-oobz-mfra")
+	reporter.Stage(transport.StageRendezvous, transport.StageStateRunning, "code "+"mfrg-gzdf-mztwq")
 
-	if strings.Contains(output.String(), "gayt-emzu-gu3d-oobz-mfra") {
+	if strings.Contains(output.String(), "mfrg-gzdf-mztwq") {
 		t.Fatalf("file reporter exposed pairing code: %s", output.String())
 	}
 	if !strings.Contains(output.String(), "code [redacted]") {

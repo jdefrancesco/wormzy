@@ -27,7 +27,13 @@ If you create a different socket later, the NAT may assign a different mapping a
 
 ## Wormzy's Two Socket Paths
 
-Wormzy does not use one UDP socket for every traversal strategy. Its pairing code and candidate metadata travel through the HTTPS mailbox, not through a UDP rendezvous packet. A direct Redis mailbox is available only over loopback or a local Unix socket for development:
+Wormzy does not use one UDP socket for every traversal strategy. An opaque,
+deterministic identifier derived from the pairing code and the candidate
+metadata travel through the HTTPS mailbox, not through a UDP rendezvous packet;
+the raw pairing code remains on the clients. Because the identifier can verify
+code guesses offline, use a fresh Wormzy-generated 64-bit code and a trusted
+mailbox. A direct Redis mailbox is available only over loopback or a local Unix
+socket for development:
 
 - Pion ICE owns its own sockets and first gathers host, server-reflexive, and explicitly configured TURN candidates. Pion then performs the first connectivity checks; a configured TURN candidate may win during this initial attempt.
 - Wormzy separately binds a legacy UDP socket. `DiscoverOnConn` probes a shuffled STUN server list sequentially on that socket so its reflexive address remains valid for the later legacy punch and QUIC path.

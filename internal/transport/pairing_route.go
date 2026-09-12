@@ -17,8 +17,9 @@ const (
 	mailboxSessionIDLength = len(mailboxSessionIDPrefix) + 43
 )
 
-// deriveMailboxSessionID turns the high-entropy pairing secret into an opaque
-// routing identifier so the mailbox never learns the CPace password.
+// deriveMailboxSessionID turns the pairing secret into an opaque routing
+// identifier. The deterministic identifier hides the raw code but still lets
+// a mailbox operator verify guesses offline.
 func deriveMailboxSessionID(code string) (string, error) {
 	normalized, err := rendezvous.NormalizeCode(code)
 	if err != nil {
